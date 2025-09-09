@@ -5,11 +5,14 @@ const express = require('express')
 const cors = require('cors')
 const fs = require('fs')
 const path = require('path')
+const ttsRoute = require('./routes/tts')
 
 const cfg = require('./config') // { PORT, DATA_FILE, WEIGHT_FILE, CORS_ORIGIN 등 }
 const { readFlexibleJson, buildSnapshotFromArray, watchFile } = require('./services/snapshot')
-const buildChatRoutes = require('./routes/chat') // export default function ({ getSnapshot, getWeights }) => Router
+const buildChatRoutes = require('./routes/chat') //
+//  export default function ({ getSnapshot, getWeights }) => Router
 const fineTuneRoutes = require('./routes/finetune') // export Router
+const ttsRouter = require('./routes/tts')
 const { DEFAULT_W } = require('./lib/search')
 
 // -------------------------------------------------------------
@@ -70,6 +73,9 @@ const app = express()
 
 // CORS
 app.use(cors(cfg.CORS_ORIGIN ? { origin: cfg.CORS_ORIGIN, credentials: true } : undefined))
+
+app.use('/api', buildChatRoutes(ctx))
+app.use('/api/tts', ttsRoute)
 
 // 바디 파서
 app.use(express.json({ limit: '2mb' }))

@@ -112,28 +112,34 @@ const error = ref('')
 
 /** 서버 호출 (/api/chat) */
 async function ask() {
-	loading.value = true
-	error.value = ''
-	reply.value = ''
-	items.value = []
-	try {
-		const r = await fetch('/api/chat', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ message: q.value }),
-		})
-		if (!r.ok) throw new Error(`HTTP ${r.status}`)
-		const data = await r.json()
-		reply.value = data.reply || ''
-		items.value = data.items || []
-		if (reply.value) speak(reply.value) // 🔊 TTS
-	} catch (e) {
-		console.error(e)
-		error.value = String(e.message ?? e)
-	} finally {
-		loading.value = false
-	}
+  loading.value = true
+  error.value = ''
+  reply.value = ''
+  items.value = []
+  try {
+    const r = await fetch('/api/recommend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: q.value, limit: 5 }),
+    })
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    const data = await r.json()
+    items.value = (data.items ?? data) || []
+    if (items.value.length) {
+      const top = items.value[0]
+      reply.value = `${top.year ?? ''} ${top.make} ${top.model} 포함 ${items.value.length}건 추천했습니다.`
+    } else {
+      reply.value = '조건에 맞는 매물이 없어 보입니다. 범위를 조금 넓혀 다시 시도해 주세요.'
+    }
+    if (reply.value) speak(reply.value)
+  } catch (e) {
+    console.error(e)
+    error.value = String(e.message ?? e)
+  } finally {
+    loading.value = false
+  }
 }
+
 
 /** 표시용 헬퍼 */
 function isNumber(n) {
@@ -171,18 +177,44 @@ function bodyTypeLabel(code) {
 }
 
 /** 🔊 TTS */
-function speak(text) {
-	if (!text) return
-	try {
-		const u = new SpeechSynthesisUtterance(text)
-		u.lang = 'ko-KR'
-		u.rate = 1
-		u.pitch = 1
-		speechSynthesis.cancel()
-		speechSynthesis.speak(u)
-	} catch (err) {
-		console.warn('TTS 오류:', err)
-	}
+function browserSpeakFallback(text) {
+  try {
+    const u = new SpeechSynthesisUtterance(text)
+    u.lang = 'ko-KR'
+    // 브라우저에 여성 한국어 음성이 있으면 선택
+    const voices = speechSynthesis.getVoices()
+    const pick = voices.find(v =>
+      /ko-KR/i.test(v.lang) &&
+      /(Neural|Natural|Female|A|B)/i.test(v.name || '')
+    ) || voices.find(v => /ko-KR/i.test(v.lang))
+    if (pick) u.voice = pick
+    u.rate = 1.0
+    u.pitch = 1.05
+    speechSynthesis.cancel()
+    speechSynthesis.speak(u)
+  } catch (e) {
+    console.warn('browser TTS fallback error:', e)
+  }
+}
+
+let audioElem = null
+async function speak(text) {
+  if (!text) return
+  try {
+    const r = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    })
+    if (!r.ok) throw new Error(`TTS HTTP ${r.status}`)
+    const blob = await r.blob()
+    try { audioElem && audioElem.pause() } catch {}
+    audioElem = new Audio(URL.createObjectURL(blob))
+    await audioElem.play()
+  } catch (err) {
+    console.warn('TTS 오류, 브라우저 음성으로 폴백:', err)
+    browserSpeakFallback(text)
+  }
 }
 
 /** 🎤 STT(Web Speech API) */

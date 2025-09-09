@@ -192,155 +192,140 @@ function priceBand(man) {
 function parseBudget(text) {
 	const t = String(text)
 	const hasPrice = LEX.priceCtx.test(t)
-	const hasMonth = LEX.monthCtx.test(t)
 	const approx = LEX.approx.test(t)
 	const le = LEX.le.test(t)
 	const ge = LEX.ge.test(t)
-
+  
 	// 월 부담
 	const mMon = t.match(/월\s*([0-9,]+|\d+(?:\.\d+)?|[가-힣]+)\s*만\s*원?/i)
 	if (mMon) {
-		const v = mMon[1].match(/[0-9,]/) ? parseFloat(mMon[1].replace(/,/g, '')) : koNumberToInt(mMon[1])
-		if (Number.isFinite(v)) {
-			const val = Math.round(v)
-			if (le && ge) return { monthlyMin: Math.max(0, Math.floor(val * 0.9)), monthlyMax: Math.ceil(val * 1.1) }
-			if (ge) return { monthlyMin: val }
-			return { monthlyMax: val }
-		}
+	  const v = mMon[1].match(/[0-9,]/) ? parseFloat(mMon[1].replace(/,/g, '')) : koNumberToInt(mMon[1])
+	  if (Number.isFinite(v)) {
+		const val = Math.round(v)
+		if (le && ge) return { monthlyMin: Math.max(0, Math.floor(val * 0.9)), monthlyMax: Math.ceil(val * 1.1) }
+		if (ge) return { monthlyMin: val }
+		return { monthlyMax: val }
+	  }
 	}
-
+  
+	// 가격 맥락이 없을 때의 축약형 처리
 	if (!hasPrice) {
-		// km/연식 맥락이 없고 억/천/만이 보이면 '가격'으로 간주 (짧은 질의 케이스)
-		if (!/(km|키로|킬로|주행|연식|년)/i.test(t) && /(억|천|만)/.test(t)) {
-			const wonLike = koNumberToInt(t) // 원 단위로 해석
-			if (wonLike > 0) {
-				// 만원 단위 예산 상한으로 사용
-				const man = normalizePriceToManWon(wonLike, 'won')
-				return { budgetMax: man }
-			}
-		}
-		return {}
+	  // km/연식 맥락이 없고 '억|천|만'이 있으면 가격으로 간주
+	  if (!/(km|키로|킬로|주행|연식|년)/i.test(t) && /(억|천|만)/.test(t)) {
+		// 1) 'N천만' / 'N천' → 만원 단위로 n*1000
+		let m = t.match(/(\d+(?:\.\d+)?)\s*천\s*만?/i)
+		if (m) return { budgetMax: Math.round(parseFloat(m[1]) * 1000) }
+		// 2) 'N만' → 만원 단위 그대로
+		m = t.match(/(\d+(?:\.\d+)?)\s*만(?!\s*(?:km|키로|킬로))/i)
+		if (m) return { budgetMax: Math.round(parseFloat(m[1])) }
+		// 3) 'N억' → 억을 만원 단위로
+		m = t.match(/(\d+(?:\.\d+)?)\s*억/i)
+		if (m) return { budgetMax: Math.round(parseFloat(m[1]) * 10000) }
+		// 4) 그 외 숫자만 있을 때는 해석 보류
+	  }
+	  return {}
 	}
-
-	// 억/만원/원
-	// 예: "1억 5천", "1500만 원", "예산 2천만", "가격대 700만"
+  
+	// 명시적 단위가 있는 일반 케이스
 	let unitHint = null
 	if (/억/.test(t)) unitHint = 'eok'
 	else if (/만\s*원|만원/.test(t)) unitHint = 'man'
 	else if (/원/.test(t)) unitHint = 'won'
-
+  
 	// A ~ B
 	const mRange = t.match(/([0-9,]+|[가-힣]+)\s*(억|만|원)?\s*[~\-–]\s*([0-9,]+|[가-힣]+)\s*(억|만|원)?/i)
 	if (mRange) {
-		const a = mRange[1],
-			b = mRange[3]
-		const uA = mRange[2] || unitHint,
-			uB = mRange[4] || unitHint
-		const vA = normalizePriceToManWon(a, uA === '억' ? 'eok' : uA === '만' ? 'man' : uA === '원' ? 'won' : unitHint)
-		const vB = normalizePriceToManWon(b, uB === '억' ? 'eok' : uB === '만' ? 'man' : uB === '원' ? 'won' : unitHint)
-		if (Number.isFinite(vA) && Number.isFinite(vB)) {
-			const min = Math.min(vA, vB),
-				max = Math.max(vA, vB)
-			return { budgetMin: min, budgetMax: max }
-		}
+	  const [ , a, ua, b, ub ] = mRange
+	  const vA = normalizePriceToManWon(a, ua === '억' ? 'eok' : ua === '만' ? 'man' : ua === '원' ? 'won' : unitHint)
+	  const vB = normalizePriceToManWon(b, ub === '억' ? 'eok' : ub === '만' ? 'man' : ub === '원' ? 'won' : unitHint)
+	  if (Number.isFinite(vA) && Number.isFinite(vB)) {
+		const min = Math.min(vA, vB), max = Math.max(vA, vB)
+		return { budgetMin: min, budgetMax: max }
+	  }
 	}
-
-	// “300만원대”, “천오백만원대”
+  
+	// “N만원대”
 	const mBand = t.match(/([0-9,]+|[가-힣]+)\s*만?\s*원?\s*대\b/i)
 	if (mBand) {
-		const v = normalizePriceToManWon(mBand[1], 'man')
-		if (Number.isFinite(v)) {
-			const { min, max } = priceBand(v)
-			return { budgetMin: min, budgetMax: max }
-		}
+	  const v = normalizePriceToManWon(mBand[1], 'man')
+	  if (Number.isFinite(v)) {
+		const { min, max } = priceBand(v)
+		return { budgetMin: min, budgetMax: max }
+	  }
 	}
-
+  
 	// 단일 값
 	const mSingle =
-		t.match(/([0-9,]+|[가-힣]+)\s*(억|만|원)\b/i) || t.match(/(?:예산|가격|금액|차값|가격대)\s*([0-9,]+|[가-힣]+)/i)
+	  t.match(/([0-9,]+|[가-힣]+)\s*(억|만|원)\b/i) || t.match(/(?:예산|가격|금액|차값|가격대)\s*([0-9,]+|[가-힣]+)/i)
 	if (mSingle) {
-		const val = normalizePriceToManWon(
-			mSingle[1],
-			mSingle[2] === '억' ? 'eok' : mSingle[2] === '만' ? 'man' : mSingle[2] === '원' ? 'won' : unitHint,
-		)
-		if (Number.isFinite(val)) {
-			if (approx) return { budgetMin: Math.max(0, Math.floor(val * 0.9)), budgetMax: Math.ceil(val * 1.1) }
-			if (le && ge) return { budgetMin: Math.max(0, Math.floor(val * 0.9)), budgetMax: Math.ceil(val * 1.1) }
-			if (ge) return { budgetMin: val }
-			return { budgetMax: val }
-		}
+	  const val = normalizePriceToManWon(
+		mSingle[1],
+		mSingle[2] === '억' ? 'eok' : mSingle[2] === '만' ? 'man' : mSingle[2] === '원' ? 'won' : unitHint,
+	  )
+	  if (Number.isFinite(val)) {
+		if (approx || (le && ge)) return { budgetMin: Math.max(0, Math.floor(val * 0.9)), budgetMax: Math.ceil(val * 1.1) }
+		if (ge) return { budgetMin: val }
+		return { budgetMax: val }
+	  }
 	}
-
 	return {}
-}
+  }
 
 function parseMileage(s) {
 	const t = String(s)
-
-	// km 단위 토큰과 가격 맥락 감지
-	const hasKmToken = /(km|키로|킬로|주행)\b/i.test(t)
-	const hasPriceCtx = /(원|만원|억|예산|가격|금액|차값|가격대)\b/i.test(t)
-
-	// km 토큰이 없고 가격 맥락이 있으면 주행 파싱을 하지 않는다
-	if (!hasKmToken && hasPriceCtx) return {}
-
-	// 숫자 추출 유틸: 반드시 km/키로/킬로 같은 단위가 붙은 경우만 인정
+  
+	// km 단위 토큰 필요
+	const hasKmToken = /(km|키로|킬로|주행|주행거리)\b/i.test(t)
+	if (!hasKmToken) return {} // 단위 없으면 주행 해석 중단
+  
 	function extractKoreanNumberToKm(text) {
-		// 2만5천km
-		let m = text.match(/(\d+)\s*만\s*(\d+)\s*천\s*(?:km|키로|킬로)\b/i)
-		if (m) return Number(m[1]) * 10000 + Number(m[2]) * 1000
-
-		// 2.5만km
-		m = text.match(/(\d+(?:\.\d+)?)\s*만\s*(?:km|키로|킬로)\b/i)
-		if (m) return Math.round(parseFloat(m[1]) * 10000)
-
-		// 5천km
-		m = text.match(/(\d+)\s*천\s*(?:km|키로|킬로)\b/i)
-		if (m) return Number(m[1]) * 1000
-
-		// 25,000km | 25000 km
-		m = text.match(/(\d{1,3}(?:,\d{3})+|\d+)\s*(?:km|키로|킬로)\b/i)
-		if (m) return parseInt(m[1].replace(/,/g, ''), 10)
-
-		// "만키로" 같은 경우만 1만km로 인정
-		if (/\b만\s*(?:km|키로|킬로)\b/i.test(text)) return 10000
-
-		// k 단위
-		m = text.match(/(\d+(?:\.\d+)?)\s*k(?:m)?\b/i)
-		if (m) return Math.round(parseFloat(m[1]) * 1000)
-
-		return null
+	  // 2만5천 km
+	  let m = text.match(/(\d+)\s*만\s*(\d+)\s*천\s*(?:km|키로|킬로)\b/i)
+	  if (m) return Number(m[1]) * 10000 + Number(m[2]) * 1000
+	  // 2.5만 km
+	  m = text.match(/(\d+(?:\.\d+)?)\s*만\s*(?:km|키로|킬로)\b/i)
+	  if (m) return Math.round(parseFloat(m[1]) * 10000)
+	  // 5천 km
+	  m = text.match(/(\d+)\s*천\s*(?:km|키로|킬로)\b/i)
+	  if (m) return Number(m[1]) * 1000
+	  // 25,000km | 25000 km
+	  m = text.match(/(\d{1,3}(?:,\d{3})+|\d+)\s*(?:km|키로|킬로)\b/i)
+	  if (m) return parseInt(m[1].replace(/,/g, ''), 10)
+	  // 30k
+	  m = text.match(/(\d+(?:\.\d+)?)\s*k(?:m)?\b/i)
+	  if (m) return Math.round(parseFloat(m[1]) * 1000)
+	  // "만키로"
+	  if (/\b만\s*(?:km|키로|킬로)\b/i.test(text)) return 10000
+	  return null
 	}
-
-	// 텍스트에서 가장 그럴듯한 숫자 하나 선택
-	let baseKm = extractKoreanNumberToKm(t)
+  
+	const baseKm = extractKoreanNumberToKm(t)
 	if (baseKm == null) return {}
-
-	// 근사/부등호 키워드 탐지
+  
 	const hasApprox = /(내외|전후|정도|쯤|가량|안팎|근처|언저리|대략|약|한|짜리)\b/i.test(t)
 	const hasLE = /(이하|이내|미만|최대|까지)\b/i.test(t)
 	const hasGE = /(이상|초과|부터)\b/i.test(t)
-
+  
 	if (hasApprox) {
-		const tol = /짜리\b/i.test(t) ? 0.1 : 0.2
-		const minKm = Math.max(0, Math.floor(baseKm * (1 - tol)))
-		const maxKm = Math.ceil(baseKm * (1 + tol))
-		return { mileageMin: minKm, mileageMax: maxKm, mileageApprox: baseKm }
+	  const tol = /짜리\b/i.test(t) ? 0.1 : 0.2
+	  return {
+		mileageMin: Math.max(0, Math.floor(baseKm * (1 - tol))),
+		mileageMax: Math.ceil(baseKm * (1 + tol)),
+		mileageApprox: baseKm,
+	  }
 	}
 	if (hasLE && hasGE) {
-		const tol = 0.1
-		return {
-			mileageMin: Math.max(0, Math.floor(baseKm * (1 - tol))),
-			mileageMax: Math.ceil(baseKm * (1 + tol)),
-			mileageApprox: baseKm,
-		}
+	  const tol = 0.1
+	  return {
+		mileageMin: Math.max(0, Math.floor(baseKm * (1 - tol))),
+		mileageMax: Math.ceil(baseKm * (1 + tol)),
+		mileageApprox: baseKm,
+	  }
 	}
 	if (hasLE) return { mileageMax: baseKm }
 	if (hasGE) return { mileageMin: baseKm }
-
-	// 수식어 없으면 최대값으로 해석
 	return { mileageMax: baseKm }
-}
+  }
 
 function parseYear(text) {
 	const t = String(text)
@@ -420,29 +405,94 @@ function parseCategoricals(text) {
 }
 
 // 카탈로그 기반 브랜드/모델 추출
-function parseMakeModel(text, catalog = {}) {
-	const t = String(text).toLowerCase()
-	const out = {}
-	const makes = Array.isArray(catalog.makes) ? catalog.makes : []
-	const models = Array.isArray(catalog.models) ? catalog.models : []
-	for (const mk of makes) {
-		const key = String(mk).toLowerCase()
-		if (!key) continue
-		if (t.includes(key)) {
-			out.make = mk
-			break
+function _norm(s) {
+	return String(s || '')
+	  .toLowerCase()
+	  .replace(/[\s_/()-]+/g, '')
+	  .replace(/[^a-z0-9가-힣]/g, '')
+  }
+  
+  // Damerau-Levenshtein 간단 구현 (교체/삽입/삭제/전치 허용)
+  function _edit(a, b) {
+	const A = a.length, B = b.length
+	if (!A || !B) return Math.max(A, B)
+	const dp = Array.from({ length: A + 1 }, () => new Array(B + 1).fill(0))
+	for (let i = 0; i <= A; i++) dp[i][0] = i
+	for (let j = 0; j <= B; j++) dp[0][j] = j
+	for (let i = 1; i <= A; i++) {
+	  for (let j = 1; j <= B; j++) {
+		const cost = a[i - 1] === b[j - 1] ? 0 : 1
+		dp[i][j] = Math.min(
+		  dp[i - 1][j] + 1,       // 삭제
+		  dp[i][j - 1] + 1,       // 삽입
+		  dp[i - 1][j - 1] + cost // 치환
+		)
+		if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+		  dp[i][j] = Math.min(dp[i][j], dp[i - 2][j - 2] + 1) // 전치
 		}
+	  }
 	}
-	for (const md of models) {
-		const key = String(md).toLowerCase()
-		if (!key) continue
-		if (t.includes(key)) {
-			out.model = md
-			break
+	return dp[A][B]
+  }
+  
+  function parseMakeModel(text, catalog = {}) {
+	const tRaw = String(text || '')
+	const t = _norm(tRaw)
+  
+	const makes = Array.isArray(catalog.makes) ? catalog.makes.filter(Boolean) : []
+	// models는 재고에서 뽑은 "원문 모델명"(여러 단어 포함) 목록을 기대
+	const models = Array.isArray(catalog.models) ? catalog.models.filter(Boolean) : []
+  
+	// 후보 풀: {raw, norm} 형태로 미리 정규화
+	const normMakes = makes.map(mk => ({ raw: mk, norm: _norm(mk) }))
+	const normModels = models.map(md => ({ raw: md, norm: _norm(md) }))
+  
+	// 1) 완전/부분 포함 매치 우선 (길이 가중치)
+	let bestModel = null
+	for (const md of normModels) {
+	  if (!md.norm) continue
+	  if (t.includes(md.norm) || md.norm.includes(t)) {
+		const score = md.norm.length // 길이 길수록 더 구체적인 모델로 가정
+		if (!bestModel || score > bestModel.score) bestModel = { model: md.raw, score }
+	  }
+	}
+  
+	// 2) 퍼지 매칭(오타 허용): edit distance ≤ 2, 길이 대비 정규화 점수
+	if (!bestModel) {
+	  let cand = null
+	  for (const md of normModels) {
+		if (!md.norm) continue
+		const d = _edit(t, md.norm)
+		const maxLen = Math.max(1, Math.max(t.length, md.norm.length))
+		const sim = 1 - d / maxLen // 1에 가까울수록 유사
+		if (d <= 2 && sim > 0.6) {
+		  if (!cand || sim > cand.sim || (sim === cand.sim && md.norm.length > cand.len)) {
+			cand = { model: md.raw, sim, len: md.norm.length }
+		  }
 		}
+	  }
+	  if (cand) bestModel = { model: cand.model, score: cand.sim * 100 }
 	}
-	return out
-}
+  
+	// 브랜드는 모델이 정해지면 재고에서 역추론하는 게 가장 안전
+	// 카탈로그가 brandByModel 맵을 제공하면 사용, 없으면 질의문에서도 추정
+	let make
+	if (bestModel && catalog.brandByModel && catalog.brandByModel[bestModel.model]) {
+	  make = catalog.brandByModel[bestModel.model]
+	} else {
+	  let bestMake = null
+	  for (const mk of normMakes) {
+		if (!mk.norm) continue
+		if (t.includes(mk.norm) || mk.norm.includes(t)) {
+		  const score = mk.norm.length
+		  if (!bestMake || score > bestMake.score) bestMake = { make: mk.raw, score }
+		}
+	  }
+	  make = bestMake ? bestMake.make : undefined
+	}
+  
+	return { make, model: bestModel ? bestModel.model : undefined }
+  }
 
 function parseIntent(raw, catalog) {
 	const text = String(raw || '')

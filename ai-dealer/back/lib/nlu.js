@@ -275,71 +275,71 @@ function parseBudget(text) {
 }
 
 function parseMileage(s) {
-  const t = String(s)
+	const t = String(s)
 
-  // km 단위 토큰과 가격 맥락 감지
-  const hasKmToken = /(km|키로|킬로|주행)\b/i.test(t)
-  const hasPriceCtx = /(원|만원|억|예산|가격|금액|차값|가격대)\b/i.test(t)
+	// km 단위 토큰과 가격 맥락 감지
+	const hasKmToken = /(km|키로|킬로|주행)\b/i.test(t)
+	const hasPriceCtx = /(원|만원|억|예산|가격|금액|차값|가격대)\b/i.test(t)
 
-  // km 토큰이 없고 가격 맥락이 있으면 주행 파싱을 하지 않는다
-  if (!hasKmToken && hasPriceCtx) return {}
+	// km 토큰이 없고 가격 맥락이 있으면 주행 파싱을 하지 않는다
+	if (!hasKmToken && hasPriceCtx) return {}
 
-  // 숫자 추출 유틸: 반드시 km/키로/킬로 같은 단위가 붙은 경우만 인정
-  function extractKoreanNumberToKm(text) {
-    // 2만5천km
-    let m = text.match(/(\d+)\s*만\s*(\d+)\s*천\s*(?:km|키로|킬로)\b/i)
-    if (m) return Number(m[1]) * 10000 + Number(m[2]) * 1000
+	// 숫자 추출 유틸: 반드시 km/키로/킬로 같은 단위가 붙은 경우만 인정
+	function extractKoreanNumberToKm(text) {
+		// 2만5천km
+		let m = text.match(/(\d+)\s*만\s*(\d+)\s*천\s*(?:km|키로|킬로)\b/i)
+		if (m) return Number(m[1]) * 10000 + Number(m[2]) * 1000
 
-    // 2.5만km
-    m = text.match(/(\d+(?:\.\d+)?)\s*만\s*(?:km|키로|킬로)\b/i)
-    if (m) return Math.round(parseFloat(m[1]) * 10000)
+		// 2.5만km
+		m = text.match(/(\d+(?:\.\d+)?)\s*만\s*(?:km|키로|킬로)\b/i)
+		if (m) return Math.round(parseFloat(m[1]) * 10000)
 
-    // 5천km
-    m = text.match(/(\d+)\s*천\s*(?:km|키로|킬로)\b/i)
-    if (m) return Number(m[1]) * 1000
+		// 5천km
+		m = text.match(/(\d+)\s*천\s*(?:km|키로|킬로)\b/i)
+		if (m) return Number(m[1]) * 1000
 
-    // 25,000km | 25000 km
-    m = text.match(/(\d{1,3}(?:,\d{3})+|\d+)\s*(?:km|키로|킬로)\b/i)
-    if (m) return parseInt(m[1].replace(/,/g, ''), 10)
+		// 25,000km | 25000 km
+		m = text.match(/(\d{1,3}(?:,\d{3})+|\d+)\s*(?:km|키로|킬로)\b/i)
+		if (m) return parseInt(m[1].replace(/,/g, ''), 10)
 
-    // "만키로" 같은 경우만 1만km로 인정
-    if (/\b만\s*(?:km|키로|킬로)\b/i.test(text)) return 10000
+		// "만키로" 같은 경우만 1만km로 인정
+		if (/\b만\s*(?:km|키로|킬로)\b/i.test(text)) return 10000
 
-    // k 단위
-    m = text.match(/(\d+(?:\.\d+)?)\s*k(?:m)?\b/i)
-    if (m) return Math.round(parseFloat(m[1]) * 1000)
+		// k 단위
+		m = text.match(/(\d+(?:\.\d+)?)\s*k(?:m)?\b/i)
+		if (m) return Math.round(parseFloat(m[1]) * 1000)
 
-    return null
-  }
+		return null
+	}
 
-  // 텍스트에서 가장 그럴듯한 숫자 하나 선택
-  let baseKm = extractKoreanNumberToKm(t)
-  if (baseKm == null) return {}
+	// 텍스트에서 가장 그럴듯한 숫자 하나 선택
+	let baseKm = extractKoreanNumberToKm(t)
+	if (baseKm == null) return {}
 
-  // 근사/부등호 키워드 탐지
-  const hasApprox = /(내외|전후|정도|쯤|가량|안팎|근처|언저리|대략|약|한|짜리)\b/i.test(t)
-  const hasLE = /(이하|이내|미만|최대|까지)\b/i.test(t)
-  const hasGE = /(이상|초과|부터)\b/i.test(t)
+	// 근사/부등호 키워드 탐지
+	const hasApprox = /(내외|전후|정도|쯤|가량|안팎|근처|언저리|대략|약|한|짜리)\b/i.test(t)
+	const hasLE = /(이하|이내|미만|최대|까지)\b/i.test(t)
+	const hasGE = /(이상|초과|부터)\b/i.test(t)
 
-  if (hasApprox) {
-    const tol = /짜리\b/i.test(t) ? 0.1 : 0.2
-    const minKm = Math.max(0, Math.floor(baseKm * (1 - tol)))
-    const maxKm = Math.ceil(baseKm * (1 + tol))
-    return { mileageMin: minKm, mileageMax: maxKm, mileageApprox: baseKm }
-  }
-  if (hasLE && hasGE) {
-    const tol = 0.1
-    return {
-      mileageMin: Math.max(0, Math.floor(baseKm * (1 - tol))),
-      mileageMax: Math.ceil(baseKm * (1 + tol))),
-      mileageApprox: baseKm,
-    }
-  }
-  if (hasLE) return { mileageMax: baseKm }
-  if (hasGE) return { mileageMin: baseKm }
+	if (hasApprox) {
+		const tol = /짜리\b/i.test(t) ? 0.1 : 0.2
+		const minKm = Math.max(0, Math.floor(baseKm * (1 - tol)))
+		const maxKm = Math.ceil(baseKm * (1 + tol))
+		return { mileageMin: minKm, mileageMax: maxKm, mileageApprox: baseKm }
+	}
+	if (hasLE && hasGE) {
+		const tol = 0.1
+		return {
+			mileageMin: Math.max(0, Math.floor(baseKm * (1 - tol))),
+			mileageMax: Math.ceil(baseKm * (1 + tol)),
+			mileageApprox: baseKm,
+		}
+	}
+	if (hasLE) return { mileageMax: baseKm }
+	if (hasGE) return { mileageMin: baseKm }
 
-  // 수식어 없으면 최대값으로 해석
-  return { mileageMax: baseKm }
+	// 수식어 없으면 최대값으로 해석
+	return { mileageMax: baseKm }
 }
 
 function parseYear(text) {

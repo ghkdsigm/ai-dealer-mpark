@@ -1,18 +1,19 @@
 // back/index.js
-// 서버 부팅: 스냅샷 로드/감시 + 라우트 장착(추천/대화/파인튜닝)
+// 서버 부팅: 스냅샷 로드/감시 + 라우트 장착(추천/대화/파인튜닝/TTS)
 
+require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
 const fs = require('fs')
 const path = require('path')
-const ttsRoute = require('./routes/tts')
 
 const cfg = require('./config') // { PORT, DATA_FILE, WEIGHT_FILE, CORS_ORIGIN 등 }
 const { readFlexibleJson, buildSnapshotFromArray, watchFile } = require('./services/snapshot')
-const buildChatRoutes = require('./routes/chat') //
-//  export default function ({ getSnapshot, getWeights }) => Router
-const fineTuneRoutes = require('./routes/finetune') // export Router
-const ttsRouter = require('./routes/tts')
+const buildChatRoutes = require('./routes/chat')         // export: function ({ getSnapshot, getWeights }) => Router
+const fineTuneRoutes = require('./routes/finetune')      // export: Router
+const ttsRoute = require('./routes/tts')                 // export: Router(POST '/' => audio)
+
+// 검색 가중치 기본값
 const { DEFAULT_W } = require('./lib/search')
 
 // -------------------------------------------------------------
@@ -21,22 +22,21 @@ const { DEFAULT_W } = require('./lib/search')
 let W = { ...DEFAULT_W }
 
 function loadWeights() {
-	try {
-		if (fs.existsSync(cfg.WEIGHT_FILE)) {
-			const j = JSON.parse(fs.readFileSync(cfg.WEIGHT_FILE, 'utf-8'))
-			// train.js 출력 스키마(labelSpace, heads 등)를 그대로 보관
-			W = j
-			console.log('[weights] loaded from', cfg.WEIGHT_FILE)
-		} else {
-			console.log('[weights] file not found, using DEFAULT_W')
-		}
-	} catch (e) {
-		console.warn('[weights] load fail:', e.message)
-	}
+  try {
+    if (fs.existsSync(cfg.WEIGHT_FILE)) {
+      const j = JSON.parse(fs.readFileSync(cfg.WEIGHT_FILE, 'utf-8'))
+      W = j
+      console.log('[weights] loaded from', cfg.WEIGHT_FILE)
+    } else {
+      console.log('[weights] file not found, using DEFAULT_W')
+    }
+  } catch (e) {
+    console.warn('[weights] load fail:', e.message)
+  }
 }
 
 function getWeights() {
-	return W
+  return W
 }
 
 // -------------------------------------------------------------
@@ -45,18 +45,18 @@ function getWeights() {
 let snapshot = { version: 0, updatedAt: null, list: [] }
 
 function rebuildSnapshot() {
-	try {
-		const rows = readFlexibleJson(cfg.DATA_FILE)
-		snapshot = buildSnapshotFromArray(rows.length ? rows : [])
-		console.log(`[inv] v${snapshot.version} / ${snapshot.list.length} rows`)
-	} catch (e) {
-		console.error('[inv] rebuild fail:', e.message)
-		snapshot = { version: 0, updatedAt: null, list: [] }
-	}
+  try {
+    const rows = readFlexibleJson(cfg.DATA_FILE)
+    snapshot = buildSnapshotFromArray(rows.length ? rows : [])
+    console.log(`[inv] v${snapshot.version} / ${snapshot.list.length} rows`)
+  } catch (e) {
+    console.error('[inv] rebuild fail:', e.message)
+    snapshot = { version: 0, updatedAt: null, list: [] }
+  }
 }
 
 function getSnapshot() {
-	return snapshot
+  return snapshot
 }
 
 // 초기 로드
@@ -72,10 +72,11 @@ watchFile(cfg.DATA_FILE, rebuildSnapshot)
 const app = express()
 
 // CORS
-app.use(cors(cfg.CORS_ORIGIN ? { origin: cfg.CORS_ORIGIN, credentials: true } : undefined))
-
-app.use('/api', buildChatRoutes(ctx))
-app.use('/api/tts', ttsRoute)
+if (cfg.CORS_ORIGIN) {
+  app.use(cors({ origin: cfg.CORS_ORIGIN, credentials: true }))
+} else {
+  app.use(cors())
+}
 
 // 바디 파서
 app.use(express.json({ limit: '2mb' }))
@@ -83,23 +84,28 @@ app.use(express.urlencoded({ extended: true }))
 
 // 헬스 체크
 app.get('/api/health', (_req, res) => {
-	res.json({ ok: true })
+  res.json({ ok: true })
 })
 
 // 인벤토리 메타 정보
 app.get('/api/inventory/meta', (_req, res) => {
-	const s = getSnapshot()
-	res.json({
-		source: path.relative(process.cwd(), cfg.DATA_FILE),
-		version: s.version,
-		updatedAt: s.updatedAt,
-		count: s.list.length,
-	})
+  const s = getSnapshot()
+  res.json({
+    source: path.relative(process.cwd(), cfg.DATA_FILE),
+    version: s.version,
+    updatedAt: s.updatedAt,
+    count: s.list.length,
+  })
 })
 
 // 파인튜닝 라우트
 // 예: POST /api/finetune/start, GET /api/finetune/status 등
 app.use('/api', fineTuneRoutes)
+
+// TTS 라우트
+// 프론트는 POST /api/tts 로 호출해야 함
+// routes/tts.js 는 POST '/' 에서 오디오 바이너리를 반환하도록 구현
+app.use('/api/tts', ttsRoute)
 
 // 추천/대화 라우트
 // 예: POST /api/recommend, POST /api/chat 등
@@ -107,19 +113,18 @@ app.use('/api', buildChatRoutes({ getSnapshot, getWeights }))
 
 // 404 핸들러
 app.use((req, res, _next) => {
-	res.status(404).json({
-		error: 'Not Found',
-		path: req.path,
-	})
+  res.status(404).json({
+    error: 'Not Found',
+    path: req.path,
+  })
 })
 
 // 에러 핸들러
-// 라우트 내부에서 throw 된 에러를 잡아 JSON 형태로 반환
 app.use((err, _req, res, _next) => {
-	console.error('[server] error:', err)
-	res.status(err.status || 500).json({
-		error: err.message || 'Internal Server Error',
-	})
+  console.error('[server] error:', err)
+  res.status(err.status || 500).json({
+    error: err.message || 'Internal Server Error',
+  })
 })
 
 // -------------------------------------------------------------
@@ -127,20 +132,19 @@ app.use((err, _req, res, _next) => {
 // -------------------------------------------------------------
 const PORT = Number(cfg.PORT) || 3000
 const server = app.listen(PORT, () => {
-	console.log(`API server on http://localhost:${PORT}`)
-	console.log(`DATA_FILE: ${cfg.DATA_FILE}`)
-	console.log(`WEIGHT_FILE: ${cfg.WEIGHT_FILE}`)
+  console.log(`API server on http://localhost:${PORT}`)
+  console.log(`DATA_FILE: ${cfg.DATA_FILE}`)
+  console.log(`WEIGHT_FILE: ${cfg.WEIGHT_FILE}`)
 })
 
 // 종료 시그널 처리
 function gracefulShutdown(signal) {
-	console.log(`[server] received ${signal}, closing...`)
-	server.close(() => {
-		console.log('[server] closed')
-		process.exit(0)
-	})
-	// 타임아웃 강제 종료
-	setTimeout(() => process.exit(1), 10_000).unref()
+  console.log(`[server] received ${signal}, closing...`)
+  server.close(() => {
+    console.log('[server] closed')
+    process.exit(0)
+  })
+  setTimeout(() => process.exit(1), 10_000).unref()
 }
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'))

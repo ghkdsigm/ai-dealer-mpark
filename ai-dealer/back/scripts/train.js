@@ -7,6 +7,7 @@
 // - 메모리 사용량을 줄이기 위해 Float32Array로 X 빌드
 // - 학습 진행률 로그(onEpochEnd)와 총 소요시간 출력
 // - 작은 데이터셋에서 과적합 방지를 위해 epochs 조정 가능
+// - vehicles.json 정규화 로직 포함(서빙과 동일 스키마 유지 목적)
 
 const fs = require('fs')
 const path = require('path')
@@ -33,7 +34,9 @@ const TRAIN_FILE = path.join(DATA_DIR, 'train_samples.json')
 const VEHICLE_FILE = path.join(DATA_DIR, 'vehicles.json')
 const WEIGHT_FILE = path.join(DATA_DIR, 'weights.json')
 
+// -----------------------------
 // 라벨 공간
+// -----------------------------
 const LABEL_SPACE = {
   budget: Array.from(
     { length: Math.floor(BUDGET_MAX_MAN / BUDGET_STEP_MAN) },
@@ -102,36 +105,143 @@ function encodeLabel(sample) {
 }
 
 // -----------------------------
+// 인벤토리 정규화(서빙과 동일 스키마 유지 목적)
+// -----------------------------
+function mapFuel(carGas) {
+  const s = String(carGas || '').toLowerCase()
+  if (!s) return null
+  if (s.includes('수소')) return 'fcev'
+  if (s.includes('전기') && !s.includes('가솔린') && !s.includes('디젤') && !s.includes('lpg')) return 'ev'
+  if (s.includes('전기')) return 'hybrid'  // 가솔린+전기 등은 하이브리드로 통합
+  if (s.includes('디젤')) return 'diesel'
+  if (s.includes('lpg')) return 'lpg'
+  if (s.includes('가솔린') || s.includes('휘발')) return 'gasoline'
+  return null
+}
+
+function splitMakeModel(carName) {
+  const name = String(carName || '').trim()
+  if (!name) return { make: null, model: null, trim: null }
+  const parts = name.split(/\s+/)
+  const make = parts[0] || null
+  let model = null
+  let trim = null
+  if (parts.length >= 2) {
+    const clean = parts.slice(1).join(' ').replace(/\(.*?\)/g, '').trim()
+    const tokens = clean.split(/\s+/)
+    if (tokens.length === 1) {
+      model = tokens[0]
+    } else {
+      model = tokens.slice(0, 1).join(' ')
+      trim = tokens.slice(1).join(' ') || null
+    }
+  }
+  return { make, model, trim }
+}
+
+function toBool(s) {
+  if (typeof s === 'boolean') return s
+  const v = String(s || '').toLowerCase()
+  if (v === 'true') return true
+  if (v === 'false') return false
+  return undefined
+}
+
+function toInt(x) {
+  if (x == null) return null
+  const n = parseInt(String(x).replace(/[^\d-]/g, ''), 10)
+  return Number.isFinite(n) ? n : null
+}
+
+function inferBodyTypeFromName(carName) {
+  const s = String(carName || '')
+  if (/픽업|포터|봉고|라보|실버라도|f-?150/i.test(s)) return 'truck'
+  if (/밴|승합|카니발|스타렉스|스타리아/i.test(s)) return 'van'
+  if (/suv|투싼|스포티지|쏘렌토|싼타페|모하비|펠리세이드|니로|코나|셀토스/i.test(s)) return 'suv'
+  if (/해치백|i30|폴로|골프/i.test(s)) return 'hatch'
+  if (/세단|소나타|k5|k7|그랜저|제네시스|아반떼|말리부|스파크|모닝/i.test(s)) return 'sedan'
+  return null
+}
+
+function normalizeRow(r) {
+  const { make, model, trim } = splitMakeModel(r.carName)
+  const year = toInt(r.yyyy)
+  const mileage = toInt(r.km)
+  const price = toInt(r.demoAmt)                 // 단위: 만원
+  const monthlyPrice = toInt(r.monthlyDemoAmt)   // 단위: 만원
+  const fuelType = mapFuel(r.carGas)
+  const bodyType = inferBodyTypeFromName(r.carName)
+  const noAccident = toBool(r.noAccident)
+  const shortKm = toBool(r.shortKm)
+
+  return {
+    // 원본 보존 일부
+    _raw: { demoNo: r.demoNo, demoDay: r.demoDay, yymm: r.yymm, carGas: r.carGas },
+
+    // 식별/요약
+    id: String(r.demoNo || r.carNo || ''),
+    carNo: r.carNo || null,
+    carName: r.carName || null,
+
+    // 표준 필드
+    make,
+    model,
+    trim,
+    year,
+    mileage,
+    price,
+    monthlyPrice,
+    fuelType,                 // gasoline|diesel|hybrid|ev|lpg|fcev|null
+    bodyType,                 // sedan|suv|truck|van|hatch|null (추론)
+    segment: null,
+    transmission: null,
+
+    // 상태/옵션
+    noAccident,
+    shortKm,
+
+    // 표시용
+    yymm: r.yymm || null,
+    color: r.color || null,
+    colorCode: r.colorCode || null,
+
+    // 확장
+    tags: [],
+    options: [],
+  }
+}
+
+// -----------------------------
 // TensorFlow 초기화
 // -----------------------------
 let tf // TensorFlow 핸들
 let backend = '' // 최종 사용 백엔드 이름
 
 async function initTF() {
-	try {
-	  tf = require('@tensorflow/tfjs-node-gpu')
-	  backend = tf.getBackend()
-	  console.log('[TF] using native GPU backend =', backend)
-	  return
-	} catch (e) {
-	  console.warn('[TF] gpu load failed:', e.message)  // 임시 로그
-	}
-  
-	try {
-	  tf = require('@tensorflow/tfjs-node')
-	  backend = tf.getBackend()
-	  console.log('[TF] using native CPU backend =', backend)
-	  return
-	} catch (e) {
-	  console.warn('[TF] cpu load failed:', e.message)  // 임시 로그
-	}
-  
-	tf = require('@tensorflow/tfjs')
-	await tf.setBackend('cpu')
-	await tf.ready()
-	backend = tf.getBackend()
-	console.log('[TF] fallback backend =', backend)
+  try {
+    tf = require('@tensorflow/tfjs-node-gpu')
+    backend = tf.getBackend()
+    console.log('[TF] using native GPU backend =', backend)
+    return
+  } catch (e) {
+    console.warn('[TF] gpu load failed:', e.message)
   }
+
+  try {
+    tf = require('@tensorflow/tfjs-node')
+    backend = tf.getBackend()
+    console.log('[TF] using native CPU backend =', backend)
+    return
+  } catch (e) {
+    console.warn('[TF] cpu load failed:', e.message)
+  }
+
+  tf = require('@tensorflow/tfjs')
+  await tf.setBackend('cpu')
+  await tf.ready()
+  backend = tf.getBackend()
+  console.log('[TF] fallback backend =', backend)
+}
 
 // -----------------------------
 // 메인
@@ -140,23 +250,28 @@ async function main() {
   const t0 = process.hrtime.bigint()
   await initTF()
 
-  // 데이터 로드
+  // 1) 학습 샘플 로드
   const samples = JSON.parse(fs.readFileSync(TRAIN_FILE, 'utf8'))
-  // vehicles은 현재 미사용이지만 향후 레이블 검증/보강에 활용 가능
-  let vehicles = []
-  try {
-    vehicles = JSON.parse(fs.readFileSync(VEHICLE_FILE, 'utf8'))
-  } catch {}
-
   if (!Array.isArray(samples) || samples.length === 0) {
     throw new Error(`No training samples in ${TRAIN_FILE}`)
   }
 
-  // 어휘 사전 생성
+  // 2) 인벤토리 로드(정규화) - 현재 학습에 직접 사용하지 않지만, 스키마 검증 및 향후 활용
+  let normalizedVehicles = []
+  try {
+    const raw = JSON.parse(fs.readFileSync(VEHICLE_FILE, 'utf8'))
+    const arr = Array.isArray(raw?.data) ? raw.data : Array.isArray(raw) ? raw : []
+    normalizedVehicles = arr.map(normalizeRow)
+    console.log(`[data] vehicles normalized: ${normalizedVehicles.length}`)
+  } catch (e) {
+    console.warn('[data] vehicles load skipped:', e.message)
+  }
+
+  // 3) 어휘 사전 생성
   const docs = samples.map(s => tokenize(s.q))
   const tokenFreq = _.countBy(docs.flat())
   let vocab = Object.entries(tokenFreq)
-    .filter(([w, c]) => c >= 1) // 토큰 빈도
+    .filter(([, c]) => c >= 1)
     .sort((a, b) => b[1] - a[1])
     .map(([w]) => w)
 

@@ -8,7 +8,7 @@ export default defineConfig({
 		proxy: {
 		  // 프론트에서 /api 로 오는 요청을 백엔드로 넘긴다
 		  '/api': {
-			target: 'http://localhost:3000', // 백엔드 실제 포트
+			target: 'http://localhost:4000', // 백엔드 실제 포트
 			changeOrigin: true,
 			// 필요 시 ^/api 제거 등 옵션 사용 가능
 			// rewrite: (path) => path.replace(/^\/api/, '/api'),

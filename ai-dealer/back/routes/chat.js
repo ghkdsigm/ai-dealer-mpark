@@ -1,390 +1,184 @@
-// back/routes/chat.js
 // NOTE: 코드 주석에 이모티콘은 사용하지 않음
 
-const express = require('express')
-const { parseIntent } = require('../lib/nlu') // 통합 NLU (로컬 규칙 파서)
-const { ruleFilter, filterWithRelaxation } = require('../lib/search') // 필터/완화
-const { rankVehicles } = require('../lib/search') // 랭킹
-const { checklist } = require('../services/maintenance')
-const { recommendFuel } = require('../services/rules')
-const { chatAnswer } = require('../services/infer')
-const { buildComps } = require('../services/valuation')
-const { askJSON } = require('../services/llm_gemma')
+import express from 'express'
+import { askJSONForChat } from '../services/llm_gemma.js'
+import { normalizeIntent, isVehicleRelated } from '../lib/util.js'
+import { filterAndRank, normalizeVehicle } from '../lib/filter.js'
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
 
-// ------------------------------
-// 유틸
-// ------------------------------
-function safeInt(x, min) {
-  if (x === null || x === undefined) return undefined
-  const n = parseInt(String(x), 10)
-  if (!Number.isFinite(n)) return undefined
-  if (typeof min === 'number' && n < min) return min
-  return n
-}
+// 세션 유틸은 기존에 만든 app.js/session.js를 그대로 사용
+import { sidFrom } from '../app.js'
+import { getSess, resetSess } from '../services/session.js'
 
-function arrOrEmpty(v) {
-  return Array.isArray(v) ? v.filter(Boolean) : []
-}
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const dataPath = path.join(__dirname, '..', 'data', 'vehicles.json')
 
-function pickFirst(arr) {
-  return Array.isArray(arr) && arr.length > 0 ? arr[0] : undefined
-}
+// 파일 형식: { meta, data: [...] }
+const RAW = JSON.parse(fs.readFileSync(dataPath, 'utf-8'))
+const VEHICLES = Array.isArray(RAW?.data) ? RAW.data.map(normalizeVehicle) : []
 
-function hasAnyConstraint(intent) {
-  const KEYS = [
-    'budgetMin',
-    'budgetMax',
-    'monthlyMin',
-    'monthlyMax',
-    'mileageMin',
-    'mileageMax',
-    'yearMin',
-    'yearMax',
-    'yearExact',
-    'fuelType',
-    'bodyType',
-    'segment',
-    'transmission',
-    'make',
-    'model',
-    'colors',
-    'noAccident',
-  ]
-  return KEYS.some(k => {
-    const v = intent[k]
-    return Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null && v !== ''
-  })
-}
-
-// 숫자 범위 안전 보정
-function normalizeIntentRanges(intent) {
-  const out = { ...intent }
-  // 예산
-  if (Number.isFinite(out.budgetMin) && Number.isFinite(out.budgetMax) && out.budgetMin > out.budgetMax) {
-    const t = out.budgetMin
-    out.budgetMin = out.budgetMax
-    out.budgetMax = t
-  }
-  // 주행
-  if (Number.isFinite(out.mileageMin) && Number.isFinite(out.mileageMax) && out.mileageMin > out.mileageMax) {
-    const t = out.mileageMin
-    out.mileageMin = out.mileageMax
-    out.mileageMax = t
-  }
-  // 연식
-  if (Number.isFinite(out.yearMin) && Number.isFinite(out.yearMax) && out.yearMin > out.yearMax) {
-    const t = out.yearMin
-    out.yearMin = out.yearMax
-    out.yearMax = t
-  }
-  // 음수 제거
-  if (Number.isFinite(out.mileageMin) && out.mileageMin < 0) out.mileageMin = 0
-  if (Number.isFinite(out.mileageMax) && out.mileageMax < 0) out.mileageMax = 0
-  if (Number.isFinite(out.budgetMin) && out.budgetMin < 0) out.budgetMin = 0
-  if (Number.isFinite(out.budgetMax) && out.budgetMax < 0) out.budgetMax = 0
-  return out
-}
-
-// ------------------------------
-// LLM 보조 파서 (Ollama/Gemma/“라마”)
-// ------------------------------
-// Gemma3에 질의를 보내 JSON 파라미터를 얻고, 로컬 intent 스키마로 매핑한다.
-// 주의: fuelType을 "단일값"으로 매핑해야 로컬 ruleFilter가 정상 동작한다.
-async function callCloudFallback({ q }) {
-  const prompt = [
-    '너는 중고차 구매 상담 보조다. 사용자의 한국어 질문을 분석하여 아래 JSON만 출력한다.',
-    '규칙:',
-    '- 예산은 "만원" 단위 정수. 예: 2,200만원 -> 2200.',
-    '- 주행거리는 km 정수. "만"=10000, "천"=1000.',
-    '- 연식은 연도 정수 범위(min/max). "15년식"은 2015로 환산.',
-    '- 연료/차종/세그먼트/변속기/브랜드/모델/색상은 배열.',
-    '- 알 수 없으면 null 또는 빈 배열.',
-    '출력 JSON 스키마:',
-    `{
-      "normalized_query": "string",
-      "filters": {
-        "budget": { "minKman": null|number, "maxKman": null|number },
-        "mileage": { "minKm": null|number, "maxKm": null|number },
-        "years": { "min": null|number, "max": null|number },
-        "fuelTypes": string[]|[],
-        "bodyTypes": string[]|[],
-        "segments": string[]|[],
-        "transmission": string[]|[],
-        "brands": string[]|[],
-        "models": string[]|[],
-        "colors": string[]|[],
-        "notes": string[]|[]
-      }
-    }`,
-    '반드시 유효한 JSON만 출력한다.',
-    `사용자질문: ${q}`
-  ].join('\n')
-
-  const data = await askJSON(prompt, { temperature: 0.1 })
-
-  const f = data?.filters || {}
-  const intentRaw = {
-    kind: 'buy',
-    budgetMin: safeInt(f?.budget?.minKman),
-    budgetMax: safeInt(f?.budget?.maxKman),
-    mileageMin: safeInt(f?.mileage?.minKm, 0),
-    mileageMax: safeInt(f?.mileage?.maxKm),
-    yearMin: safeInt(f?.years?.min),
-    yearMax: safeInt(f?.years?.max),
-
-    // 중요: 단일값으로 매핑해야 로컬 filter가 동작
-    fuelType: pickFirst(arrOrEmpty(f?.fuelTypes)),
-    bodyType: pickFirst(arrOrEmpty(f?.bodyTypes)),
-    segment: pickFirst(arrOrEmpty(f?.segments)),
-    transmission: pickFirst(arrOrEmpty(f?.transmission)),
-    make: pickFirst(arrOrEmpty(f?.brands)),
-    model: pickFirst(arrOrEmpty(f?.models)),
-
-    colors: arrOrEmpty(f?.colors),
-    notes: arrOrEmpty(f?.notes),
-    normalizedQuery: typeof data?.normalized_query === 'string' ? data.normalized_query : ''
-  }
-
-  return { intent: normalizeIntentRanges(intentRaw), raw: data }
-}
-
-// ------------------------------
-// 라우트
-// ------------------------------
-function buildChatRoutes(ctx) {
-  const { getSnapshot, getWeights } = ctx
+export default function buildRoutes() {
   const router = express.Router()
 
-  router.get('/inventory/meta', (_req, res) => {
-    const snap = getSnapshot()
-    res.json({ version: snap.version, updatedAt: snap.updatedAt, count: snap.list.length })
-  })
-
-  // 자연어 추천 API (간단 엔드포인트)
-  router.post('/recommend', async (req, res) => {
-    const q = String(req.body?.query || '')
-    const snap = getSnapshot()
-
-    // 1) 로컬 파서
-    const catalog = {
-      makes: [...new Set(snap.list.map(v => v.make).filter(Boolean))],
-      models: [...new Set(snap.list.map(v => v.model).filter(Boolean))],
-    }
-    let intent = normalizeIntentRanges(parseIntent(q, catalog))
-    let { candidates, usedIntent, relaxed } = filterWithRelaxation(snap.list, intent)
-    let ranked = rankVehicles(candidates, usedIntent, q, getWeights())
-    let items = ranked.slice(0, 5)
-
-    // 2) 로컬이 빈약/무결과면 LLM 보조 시도
-    const needLLM =
-      items.length === 0 ||
-      !hasAnyConstraint(intent)
-
-    if (needLLM) {
-      try {
-        const cloud = await callCloudFallback({ q })
-        const r2 = filterWithRelaxation(snap.list, cloud.intent)
-        const ranked2 = rankVehicles(r2.candidates, r2.usedIntent, q, getWeights())
-        if (ranked2.length) {
-          return res.json({
-            items: ranked2.slice(0, 5),
-            intent: r2.usedIntent,
-            relaxed: r2.relaxed,
-            route: 'cloud_intent_then_local_search',
-            cloudRaw: cloud.raw
-          })
-        }
-      } catch (e) {
-        // LLM 실패는 무시하고 로컬 결과 그대로 반환
-      }
-    }
-
-    return res.json({ items, intent: usedIntent, relaxed, route: 'local_intent' })
-  })
-
-  // 대화형 엔드포인트
+  // 대화 단계: 리스트는 반환하지 않고 힌트/상태만
   router.post('/chat', async (req, res) => {
-    const raw = req.body?.message || ''
-    const user = req.body?.user || {}
+    const sid = sidFrom(req)
+    const sess = getSess(sid)
+    const msg = String(req.body?.message || '').trim()
 
-    const WAKE = /(ai\s*딜러|에이아이\s*딜러|딜러)\s*야/i
-    const greeted = WAKE.test(raw)
-    const msg = raw.replace(WAKE, '').trim()
-    const greetText = '네 고객님, 차량을 구매하실건가요? 판매하실건가요?'
+    const cloud = await askJSONForChat(msg)
+    const f = cloud?.filters || {}
 
-    const snap = getSnapshot()
-
-    // 1) 로컬 파서
-    const catalog = {
-      makes: [...new Set(snap.list.map(v => v.make).filter(Boolean))],
-      models: [...new Set(snap.list.map(v => v.model).filter(Boolean))],
-    }
-    const intentLocal = normalizeIntentRanges(parseIntent(msg, catalog))
-
-    // 판매 플로우
-    if (intentLocal.kind === 'sell') {
-      const needName = !intentLocal.carName
-      const needYear = !intentLocal.year
-      const needKm = intentLocal.mileage == null
-      if (needName || needYear || needKm) {
-        const holes = []
-        if (needName) holes.push('차명(예: 현대 제네시스DH G330 모던)')
-        if (needYear) holes.push('연식(예: 2016년)')
-        if (needKm) holes.push('주행거리(예: 12만 km)')
-        let reply = `판매하실 차량 정보를 알려주세요.\n필요 정보: ${holes.join(', ')}`
-        if (greeted) reply = `${greetText}\n${reply}`
-        return res.json({ reply, items: [], intent: intentLocal })
-      }
-
-      const subject = {
-        carName: intentLocal.carName,
-        year: intentLocal.year,
-        mileage: intentLocal.mileage,
-        fuelType: intentLocal.fuelType,
-        color: intentLocal.color,
-      }
-      const { comps, estimate } = buildComps(snap.list, subject)
-
-      let reply = `입력하신 차량 기준 예상 매입가(만 원): ${estimate.low.toLocaleString()} ~ ${estimate.high.toLocaleString()} (중앙값 ${estimate.mid.toLocaleString()}).\n유사 매물 기준으로 산정했다. 실제 가격은 상태/사고/옵션에 따라 달라질 수 있다.`
-      if (greeted) reply = `${greetText}\n${reply}`
-
-      return res.json({ reply, items: comps.slice(0, 6), intent: intentLocal, estimate })
+    if (Array.isArray(f?.notes) && f.notes.includes('non_vehicle')) {
+      return res.json({
+        reply: '엠파크 차량 관련 질문에만 답할 수 있어요. 예산대(예: 2천만 원대)나 차종(SUV/세단) 중 하나를 알려주시면 추천을 준비하겠습니다.',
+        items: [],
+        route: 'non_vehicle',
+        intent: sess.intent
+      })
     }
 
-    // 구매 플로우 판별
-    const looksVehicle =
-      /(차|차량|suv|세단|연비|예산|가격|원|만원|억|km|키로|주행|주행거리|연식|옵션|브랜드|모델|사고|무사고|lpg|디젤|가솔린|하이브리드|전기)/i.test(
-        msg,
-      )
+    // 세션 intent 갱신
+    sess.intent = normalizeIntent({
+      ...sess.intent,
+      // 금액
+      budgetMin: f?.budget?.minKman ?? sess.intent.budgetMin,
+      budgetMax: f?.budget?.maxKman ?? sess.intent.budgetMax,
+      // 월납입
+      monthlyMin: f?.monthly?.minKman ?? sess.intent.monthlyMin,
+      monthlyMax: f?.monthly?.maxKman ?? sess.intent.monthlyMax,
+      // 주행/연식
+      kmMin: f?.km?.minKm ?? sess.intent.kmMin,
+      kmMax: f?.km?.maxKm ?? sess.intent.kmMax,
+      yearMin: f?.years?.min ?? sess.intent.yearMin,
+      yearMax: f?.years?.max ?? sess.intent.yearMax,
+      // 연료/차종
+      fuelType: (f.fuelTypes && f.fuelTypes[0]) ?? sess.intent.fuelType,
+      bodyType: (f.bodyTypes && f.bodyTypes[0]) ?? sess.intent.bodyType,
+      // 기타
+      brands: (Array.isArray(f.brands) && f.brands.length) ? f.brands : (sess.intent.brands || []),
+      models: (Array.isArray(f.models) && f.models.length) ? f.models : (sess.intent.models || []),
+      colors: (Array.isArray(f.colors) && f.colors.length) ? f.colors : (sess.intent.colors || []),
+      options: (Array.isArray(f.options) && f.options.length) ? f.options : (sess.intent.options || []),
+      noAccident: (typeof f.noAccident === 'boolean') ? f.noAccident : (sess.intent.noAccident ?? null),
+      shortKm: (typeof f.shortKm === 'boolean') ? f.shortKm : (sess.intent.shortKm ?? null),
+    })
 
-    const hasConstraints = hasAnyConstraint(intentLocal)
+    if (cloud?.direct_reply) {
+      return res.json({ 
+        reply: cloud.direct_reply, 
+        items: [], 
+        route: 'direct_reply', 
+        intent: sess.intent 
+      })
+    }
 
-    if (looksVehicle || intentLocal.kind === 'buy' || hasConstraints) {
-      let fuelGuide = null
-      if (user && (user.yearlyKm || user.monthlyKm)) fuelGuide = recommendFuel(user)
+    // 준비 상태 판정: 조건 중 하나라도 있으면 ready
+    const i = sess.intent
+    const hasBudget = Number.isFinite(i.budgetMax) || Number.isFinite(i.budgetMin)
+    const hasMonthly = Number.isFinite(i.monthlyMax) || Number.isFinite(i.monthlyMin)
+    const hasType = !!(i.bodyType || i.fuelType)
+    const hasUsage = Number.isFinite(i.kmMax) || Number.isFinite(i.yearMin) || Number.isFinite(i.yearMax)
+    const hasKeyword = (i.brands?.length || i.models?.length || i.colors?.length || i.options?.length)
+    const wantRecommend = /(추천|추천해줘|보여줘|골라줘|리스트|찾아줘)/i.test(msg)
 
-      // 1) 로컬 의도 기반 후보군
-      let { candidates, usedIntent, relaxed } = filterWithRelaxation(snap.list, intentLocal)
-      let ranked = rankVehicles(candidates, usedIntent, msg, getWeights())
-      let items = ranked.slice(0, 5)
+    const ready = hasBudget || hasMonthly || hasType || hasUsage || hasKeyword
 
-      // 2) 태그 표현
-      const mileageTag =
-        typeof usedIntent.mileageMin === 'number' && typeof usedIntent.mileageMax === 'number'
-          ? `주행 ${usedIntent.mileageMin.toLocaleString()}~${usedIntent.mileageMax.toLocaleString()}km`
-          : typeof usedIntent.mileageMin === 'number'
-          ? `주행≥${usedIntent.mileageMin.toLocaleString()}km`
-          : typeof usedIntent.mileageMax === 'number'
-          ? `주행≤${usedIntent.mileageMax.toLocaleString()}km`
-          : ''
+    if (wantRecommend && ready) {
+      return res.json({
+        reply: '조건이 충분합니다! "추천 실행" 버튼을 눌러 맞춤 차량을 찾아보세요.',
+        items: [],
+        route: 'trigger_recommend',
+        intent: sess.intent
+      })
+    }
 
-      // 3) 로컬 결과가 없거나 제약이 거의 없으면 LLM 보조 시도
-      const needLLM =
-        items.length === 0 ||
-        !hasAnyConstraint(intentLocal)
+    if (ready) {
+      return res.json({
+        reply: '조건이 모였습니다. "추천 실행" 버튼을 눌러 결과를 확인해 주세요.',
+        items: [],
+        route: 'ready',
+        intent: sess.intent
+      })
+    }
 
-      if (needLLM) {
-        try {
-          const cloud = await callCloudFallback({ q: msg })
-          const r2 = filterWithRelaxation(snap.list, cloud.intent)
-          const ranked2 = rankVehicles(r2.candidates, r2.usedIntent, msg, getWeights())
-          const items2 = ranked2.slice(0, 5)
+    // 아직 부족하면 최소 단서만 더 유도
+    const asks = []
+    if (!hasBudget && !hasMonthly) asks.push('예산대 또는 월 납입액(예: 2천만 원대, 월 25만)')
+    if (!hasType) asks.push('차종/연료(예: 세단, SUV, 디젤)')
+    if (!hasUsage) asks.push('주행/연식(예: 8만km 이하, 16~19년식)')
+    asks.push('브랜드/모델/색상/옵션 중 하나')
 
-          if (items2.length > 0) {
-            const tags2 = [
-              typeof r2.usedIntent.budgetMax === 'number' ? `예산≤${r2.usedIntent.budgetMax}만원` : '',
-              typeof r2.usedIntent.monthlyMax === 'number' ? `월≤${r2.usedIntent.monthlyMax}만원` : '',
-              typeof r2.usedIntent.mileageMin === 'number' && typeof r2.usedIntent.mileageMax === 'number'
-                ? `주행 ${r2.usedIntent.mileageMin.toLocaleString()}~${r2.usedIntent.mileageMax.toLocaleString()}km`
-                : typeof r2.usedIntent.mileageMin === 'number'
-                ? `주행≥${r2.usedIntent.mileageMin.toLocaleString()}km`
-                : typeof r2.usedIntent.mileageMax === 'number'
-                ? `주행≤${r2.usedIntent.mileageMax.toLocaleString()}km`
-                : '',
-              r2.usedIntent.bodyType ? `차종:${r2.usedIntent.bodyType}` : '',
-              r2.usedIntent.segment ? `세그:${r2.usedIntent.segment}` : '',
-              r2.usedIntent.fuelType ? `연료:${r2.usedIntent.fuelType}` : '',
-              fuelGuide ? `주행패턴:${fuelGuide.join('/')}` : '',
-            ]
-              .filter(Boolean)
-              .join(' · ')
+    return res.json({
+      reply: `다음 중 하나만 알려주세요: ${asks.join(', ')}`,
+      items: [],
+      route: 'collect',
+      intent: sess.intent
+    })
+  })
 
-            const relaxNote2 = r2.relaxed.length ? ` (일부 조건 완화: ${r2.relaxed.join(', ')})` : ''
-            let reply2 = `요청을 반영해 골라봤다${relaxNote2}. ${items2[0].year ?? ''} ${items2[0].make} ${items2[0].model}${tags2 ? ` (${tags2})` : ''}가 조건에 잘 맞는다.`
-            if (greeted) reply2 = `${greetText}\n${reply2}`
+  // 최종 추천: 세션 intent + 옵션 q 하나 더 반영
+  router.post('/recommend', async (req, res) => {
+    const sid = sidFrom(req)
+    const sess = getSess(sid)
+    const q = String(req.body?.q || '').trim()
 
-            return res.json({
-              reply: reply2,
-              items: items2,
-              intent: r2.usedIntent,
-              fuelGuide,
-              relaxed: r2.relaxed,
-              cloudRaw: cloud.raw,
-              route: 'cloud_intent_then_local_search'
-            })
-          }
-        } catch (e) {
-          // LLM 보조 실패는 무시
+    if (q) {
+      const cloud = await askJSONForChat(q)
+      const f = cloud?.filters || {}
+      sess.intent = normalizeIntent({
+        ...sess.intent,
+        budgetMin: f?.budget?.minKman ?? sess.intent.budgetMin,
+        budgetMax: f?.budget?.maxKman ?? sess.intent.budgetMax,
+        monthlyMin: f?.monthly?.minKman ?? sess.intent.monthlyMin,
+        monthlyMax: f?.monthly?.maxKman ?? sess.intent.monthlyMax,
+        kmMin: f?.km?.minKm ?? sess.intent.kmMin,
+        kmMax: f?.km?.maxKm ?? sess.intent.kmMax,
+        yearMin: f?.years?.min ?? sess.intent.yearMin,
+        yearMax: f?.years?.max ?? sess.intent.yearMax,
+        fuelType: (f.fuelTypes && f.fuelTypes[0]) ?? sess.intent.fuelType,
+        bodyType: (f.bodyTypes && f.bodyTypes[0]) ?? sess.intent.bodyType,
+        brands: (Array.isArray(f.brands) && f.brands.length) ? f.brands : (sess.intent.brands || []),
+        models: (Array.isArray(f.models) && f.models.length) ? f.models : (sess.intent.models || []),
+        colors: (Array.isArray(f.colors) && f.colors.length) ? f.colors : (sess.intent.colors || []),
+        options: (Array.isArray(f.options) && f.options.length) ? f.options : (sess.intent.options || []),
+        noAccident: (typeof f.noAccident === 'boolean') ? f.noAccident : (sess.intent.noAccident ?? null),
+        shortKm: (typeof f.shortKm === 'boolean') ? f.shortKm : (sess.intent.shortKm ?? null),
+      })
+    }
+
+    const limit = Number(req.body?.limit || 100)
+    const out = filterAndRank(VEHICLES, sess.intent).slice(0, limit)
+
+    if (!out.length) {
+      return res.json({
+        reply: '죄송합니다. 현재 조건에 맞는 매물을 찾지 못했습니다. 예산 범위를 넓히거나 다른 조건으로 다시 시도해 주세요. 예: "중형 세단 8만km 이하 2,000만원대"',
+        items: [],
+        route: 'no_result',
+        debug: { 
+          intent: sess.intent,
+          totalVehicles: VEHICLES.length,
+          filteredCount: filterAndRank(VEHICLES, sess.intent).length
         }
-      }
-
-      // 4) 로컬 결과 응답
-      let reply
-      if (items.length) {
-        const top = items[0]
-        const tags = [
-          typeof usedIntent.budgetMax === 'number' ? `예산≤${usedIntent.budgetMax}만원` : '',
-          typeof usedIntent.monthlyMax === 'number' ? `월≤${usedIntent.monthlyMax}만원` : '',
-          mileageTag,
-          usedIntent.bodyType ? `차종:${usedIntent.bodyType}` : '',
-          usedIntent.segment ? `세그:${usedIntent.segment}` : '',
-          usedIntent.fuelType ? `연료:${usedIntent.fuelType}` : '',
-          fuelGuide ? `주행패턴:${fuelGuide.join('/')}` : '',
-        ]
-          .filter(Boolean)
-          .join(' · ')
-        const relaxNote = relaxed.length ? ` (일부 조건 완화: ${relaxed.join(', ')})` : ''
-        reply = `요청을 반영해 골라봤다${relaxNote}. ${top.year ?? ''} ${top.make} ${top.model}${tags ? ` (${tags})` : ''}가 조건에 잘 맞는다.`
-      } else {
-        reply = `정확히 일치하는 매물은 없어 조건을 조금 완화해 다시 시도해 달라. 예: "중형 세단 8만km 이하"처럼 범위를 넓혀보자.`
-      }
-      if (greeted) reply = `${greetText}\n${reply}`
-      return res.json({ reply, items, intent: usedIntent, fuelGuide, relaxed })
+      })
     }
 
-    // 차량번호 점검
-    const plateMatch = msg.match(/([0-9]{2,3}[가-힣][0-9]{4})/)
-    if (plateMatch) {
-      const carNo = plateMatch[1]
-      const v = snap.list.find(x => x.carNo === carNo)
-      if (!v) {
-        let reply = '해당 차량번호를 찾지 못했다.'
-        if (greeted) reply = `${greetText}\n${reply}`
-        return res.json({ reply, items: [] })
-      }
-      const list = checklist({ year: v.year, mileage: v.mileage })
-      let reply = `차량(${v.carName}) 점검 제안: ${list.join(' · ')}`
-      if (greeted) reply = `${greetText}\n${reply}`
-      return res.json({ reply, items: [v] })
-    }
+    return res.json({
+      reply: `요청을 종합해 ${out.length}건을 추천드립니다.`,
+      items: out,
+      route: 'final_recommend',
+      debug: { intent: sess.intent }
+    })
+  })
 
-    // 일반 Q&A → (있으면) 클라우드/FT
-    const messages = [
-      { role: 'system', content: '너는 엠파크 AI딜러 보조원. 사실 기반으로 짧고 정확하게 답한다.' },
-      { role: 'user', content: msg },
-    ]
-    try {
-      let reply = await chatAnswer(messages, { useFtIfAvailable: true })
-      if (greeted) reply = `${greetText}\n${reply}`
-      return res.json({ reply, items: [] })
-    } catch (e) {
-      let reply = '지금은 답변을 가져오지 못했다. 나중에 다시 시도해 달라.'
-      if (greeted) reply = `${greetText}\n${reply}`
-      return res.json({ reply, items: [] })
-    }
+  router.post('/reset', (req, res) => {
+    const sid = sidFrom(req)
+    resetSess(sid)
+    res.json({ ok: true })
   })
 
   return router
 }
-
-module.exports = buildChatRoutes

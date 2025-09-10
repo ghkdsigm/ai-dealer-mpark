@@ -41,7 +41,7 @@ function iint(x) { const n = parseInt(String(x), 10); return Number.isFinite(n) 
 function approxToRange(km) {
   if (!Number.isFinite(km)) return {}
   const tol = Math.max(2000, Math.round(km * 0.2))
-  return { mileageMin: Math.max(0, km - tol), mileageMax: km + tol, mileageApprox: km }
+  return { kmMin: Math.max(0, km - tol), kmMax: km + tol, kmApprox: km }
 }
 
 function buildPrompt(q) {
@@ -49,7 +49,7 @@ function buildPrompt(q) {
     '너는 중고차 구매 조건 파서다. 아래 한국어 문장을 읽고 JSON만 출력한다.',
     '규칙:',
     '- 예산은 만원 단위 정수 budget.max_man / budget.min_man.',
-    '- 주행거리는 km 정수. "내외/정도/쯤"은 mileage.approx_km, 이하/이상은 max_km/min_km.',
+    '- 주행거리는 km 정수. "내외/정도/쯤"은 km.approx_km, 이하/이상은 max_km/min_km.',
     '- 연식은 years.min/years.max/years.exact 정수(연도).',
     '- 연료/차종/브랜드/모델/색상은 표준 토큰으로.',
     '- usage: offroad, family, cargo, commute, long_trip, city 등.',
@@ -58,7 +58,7 @@ function buildPrompt(q) {
     '출력 스키마:',
     `{
       "budget": { "max_man": null, "min_man": null },
-      "mileage": { "approx_km": null, "max_km": null, "min_km": null },
+      "km": { "approx_km": null, "max_km": null, "min_km": null },
       "years": { "min": null, "max": null, "exact": null },
       "fuel_types": [],
       "body_types": [],
@@ -78,7 +78,7 @@ async function extractIntentViaLLM(q) {
   const data = await askJSON(buildPrompt(q), { temperature: 0.1 })
 
   const b = data?.budget || {}
-  const m = data?.mileage || {}
+  const m = data?.km || {}
   const y = data?.years || {}
 
   const fuel_types = (data?.fuel_types || []).map(s => norm(MAP.fuel, s)).filter(Boolean)
@@ -86,24 +86,24 @@ async function extractIntentViaLLM(q) {
   const usage = (data?.usage || []).map(s => norm(MAP.usage, s)).filter(Boolean)
   const priority = (data?.priority || []).map(s => norm(MAP.priority, s)).filter(Boolean)
 
-  let mileageMin, mileageMax, mileageApprox
+  let kmMin, kmMax, kmApprox
   if (Number.isFinite(m?.approx_km)) {
     const r = approxToRange(m.approx_km)
-    mileageMin = r.mileageMin
-    mileageMax = r.mileageMax
-    mileageApprox = r.mileageApprox
+    kmMin = r.kmMin
+    kmMax = r.kmMax
+    kmApprox = r.kmApprox
   } else {
-    mileageMin = iint(m?.min_km)
-    mileageMax = iint(m?.max_km)
+    kmMin = iint(m?.min_km)
+    kmMax = iint(m?.max_km)
   }
 
   const intent = {
     kind: 'buy',
     budgetMin: iint(b?.min_man),
     budgetMax: iint(b?.max_man),
-    mileageMin,
-    mileageMax,
-    mileageApprox,
+    kmMin,
+    kmMax,
+    kmApprox,
     yearMin: iint(y?.min),
     yearMax: iint(y?.max),
     yearExact: iint(y?.exact),

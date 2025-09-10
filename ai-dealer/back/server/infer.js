@@ -10,7 +10,7 @@ const { ruleFilter, filterWithRelaxation, rankVehicles } = require('../lib/searc
 
 // 경로
 const DATA_DIR = path.resolve(__dirname, '../_data')
-const VEHICLE_FILE = path.join(DATA_DIR, 'vehicles.json')
+const VEHICLE_FILE = path.join(DATA_DIR, 'merge-vehicles.json')
 const WEIGHT_FILE = path.join(DATA_DIR, 'weights.json')
 
 // 안전 로드
@@ -147,10 +147,10 @@ function normalize(v) {
     }
   }
 
-  // 주행거리: km -> mileage
-  if (typeof out.mileage !== 'number') {
+  // 주행거리: km -> km
+  if (typeof out.km !== 'number') {
     const km = intOrNull(out.km) ?? intOrNull(out.odometer)
-    if (km != null) out.mileage = km
+    if (km != null) out.km = km
   }
 
   // 가격: demoAmt(만원) 또는 price(원→만원 환산)

@@ -271,7 +271,7 @@ function parseBudget(text) {
 	return {}
   }
 
-function parseMileage(s) {
+function parsekm(s) {
 	const t = String(s)
   
 	// km 단위 토큰 필요
@@ -309,22 +309,22 @@ function parseMileage(s) {
 	if (hasApprox) {
 	  const tol = /짜리\b/i.test(t) ? 0.1 : 0.2
 	  return {
-		mileageMin: Math.max(0, Math.floor(baseKm * (1 - tol))),
-		mileageMax: Math.ceil(baseKm * (1 + tol)),
-		mileageApprox: baseKm,
+		kmMin: Math.max(0, Math.floor(baseKm * (1 - tol))),
+		kmMax: Math.ceil(baseKm * (1 + tol)),
+		kmApprox: baseKm,
 	  }
 	}
 	if (hasLE && hasGE) {
 	  const tol = 0.1
 	  return {
-		mileageMin: Math.max(0, Math.floor(baseKm * (1 - tol))),
-		mileageMax: Math.ceil(baseKm * (1 + tol)),
-		mileageApprox: baseKm,
+		kmMin: Math.max(0, Math.floor(baseKm * (1 - tol))),
+		kmMax: Math.ceil(baseKm * (1 + tol)),
+		kmApprox: baseKm,
 	  }
 	}
-	if (hasLE) return { mileageMax: baseKm }
-	if (hasGE) return { mileageMin: baseKm }
-	return { mileageMax: baseKm }
+	if (hasLE) return { kmMax: baseKm }
+	if (hasGE) return { kmMin: baseKm }
+	return { kmMax: baseKm }
   }
 
 function parseYear(text) {
@@ -501,7 +501,7 @@ function parseIntent(raw, catalog) {
 	const sellLike = /(판매|팔|매입|견적|시세)/i.test(text)
 
 	const budget = parseBudget(text)
-	const mileage = parseMileage(text)
+	const km = parsekm(text)
 	const year = parseYear(text)
 	const cat = parseCategoricals(text)
 	const mkmd = parseMakeModel(text, catalog)
@@ -515,9 +515,9 @@ function parseIntent(raw, catalog) {
 		budgetMax: budget.budgetMax,
 		monthlyMin,
 		monthlyMax,
-		mileageMin: mileage.mileageMin,
-		mileageMax: mileage.mileageMax,
-		mileageApprox: mileage.mileageApprox,
+		kmMin: km.kmMin,
+		kmMax: km.kmMax,
+		kmApprox: km.kmApprox,
 		yearMin: year.yearMin,
 		yearMax: year.yearMax,
 		yearExact: year.yearExact,

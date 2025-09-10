@@ -13,6 +13,13 @@ const fs = require('fs')
 const path = require('path')
 const _ = require('lodash')
 
+function loadArrayJson(absPath) {
+  const raw = JSON.parse(fs.readFileSync(absPath, 'utf8'));
+  if (Array.isArray(raw)) return raw;             // 구(旧) 포맷: 배열
+  if (raw && Array.isArray(raw.data)) return raw.data;  // 신(新) 포맷: { meta, data }
+  return [];
+}
+
 // -----------------------------
 // 하이퍼파라미터/설정 (ENV로 오버라이드 가능)
 // -----------------------------
@@ -31,7 +38,7 @@ const SHUFFLE = String(process.env.SHUFFLE || 'true') === 'true'
 // 경로 상수
 const DATA_DIR = path.resolve(__dirname, '../_data')
 const TRAIN_FILE = path.join(DATA_DIR, 'train_samples.json')
-const VEHICLE_FILE = path.join(DATA_DIR, 'vehicles.json')
+const VEHICLE_FILE = path.join(DATA_DIR, 'merge-vehicles.json')
 const WEIGHT_FILE = path.join(DATA_DIR, 'weights.json')
 
 // -----------------------------
@@ -44,7 +51,7 @@ const LABEL_SPACE = {
   ),
   body: ['SUV', 'Sedan', 'Hatch', 'Van', 'Truck'],
   fuel: ['Gasoline', 'Diesel', 'Hybrid', 'EV', 'LPG'],
-  mileage: ['≤50k', '≤100k', '>100k'],
+  km: ['≤50k', '≤100k', '>100k'],
   usage: ['family', 'commute', 'offroad', 'business'],
   priority: ['fuel_efficiency', 'trunk', 'safety', 'price', 'maintenance'],
 }
@@ -93,7 +100,7 @@ function encodeLabel(sample) {
 
   y.body = LABEL_SPACE.body.map(v => (sample.labels.body === v ? 1 : 0))
   y.fuel = LABEL_SPACE.fuel.map(v => (sample.labels.fuel === v ? 1 : 0))
-  y.mileage = LABEL_SPACE.mileage.map(v => (sample.labels.mileage === v ? 1 : 0))
+  y.km = LABEL_SPACE.km.map(v => (sample.labels.km === v ? 1 : 0))
 
   const usageSet = new Set([sample.labels.usage].flat().filter(Boolean))
   y.usage = LABEL_SPACE.usage.map(v => (usageSet.has(v) ? 1 : 0))
@@ -166,7 +173,7 @@ function inferBodyTypeFromName(carName) {
 function normalizeRow(r) {
   const { make, model, trim } = splitMakeModel(r.carName)
   const year = toInt(r.yyyy)
-  const mileage = toInt(r.km)
+  const km = toInt(r.km)
   const price = toInt(r.demoAmt)                 // 단위: 만원
   const monthlyPrice = toInt(r.monthlyDemoAmt)   // 단위: 만원
   const fuelType = mapFuel(r.carGas)
@@ -188,7 +195,7 @@ function normalizeRow(r) {
     model,
     trim,
     year,
-    mileage,
+    km,
     price,
     monthlyPrice,
     fuelType,                 // gasoline|diesel|hybrid|ev|lpg|fcev|null
@@ -251,10 +258,8 @@ async function main() {
   await initTF()
 
   // 1) 학습 샘플 로드
-  const samples = JSON.parse(fs.readFileSync(TRAIN_FILE, 'utf8'))
-  if (!Array.isArray(samples) || samples.length === 0) {
-    throw new Error(`No training samples in ${TRAIN_FILE}`)
-  }
+  const samples = loadArrayJson(path.resolve(__dirname, '../_data/train_samples.json'));
+if (!samples.length) throw new Error(`No training samples in ${path.resolve(__dirname, '../_data/train_samples.json')}`);
 
   // 2) 인벤토리 로드(정규화) - 현재 학습에 직접 사용하지 않지만, 스키마 검증 및 향후 활용
   let normalizedVehicles = []
@@ -390,7 +395,7 @@ async function main() {
   heads.budget = await trainHead('budget', LABEL_SPACE.budget.length, 'softmax', EPOCH_SOFTMAX)
   heads.body = await trainHead('body', LABEL_SPACE.body.length, 'softmax', EPOCH_SOFTMAX)
   heads.fuel = await trainHead('fuel', LABEL_SPACE.fuel.length, 'softmax', EPOCH_SOFTMAX)
-  heads.mileage = await trainHead('mileage', LABEL_SPACE.mileage.length, 'softmax', Math.max(150, Math.floor(EPOCH_SOFTMAX * 0.85)))
+  heads.km = await trainHead("km", LABEL_SPACE.km.length, 'softmax', Math.max(150, Math.floor(EPOCH_SOFTMAX * 0.85)))
   heads.usage = await trainHead('usage', LABEL_SPACE.usage.length, 'sigmoid', EPOCH_SIGMOID)
   heads.priority = await trainHead('priority', LABEL_SPACE.priority.length, 'sigmoid', EPOCH_SIGMOID)
 

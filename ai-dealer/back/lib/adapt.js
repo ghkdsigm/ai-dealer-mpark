@@ -42,14 +42,14 @@ function splitMakeModel(carName = '') {
  * { "statusCode":0, "responseMessage":"...", "data":[{...}, ...] }
  * 내부 표준 스키마:
  * { id, demoNo, carNo, carName, make, model, year, yymm, bodyType, fuelType,
- *   mileage, price, monthlyPrice, noAccident, raw }
+ *   km, price, monthlyPrice, noAccident, raw }
  */
 function adaptRecord(r) {
 	const { make, model } = splitMakeModel(r.carName || '')
 	const price = toIntOrNull(r.demoAmt) // 만원
 	const monthlyPrice = toIntOrNull(r.monthlyDemoAmt) // 만원
 	const year = toIntOrNull(r.yyyy) || undefined
-	const mileage = toIntOrNull(r.km) || 0
+	const km = toIntOrNull(r.km) || 0
 	return {
 		id: r.demoNo || r.carNo || `${Math.random()}`.slice(2),
 		demoNo: r.demoNo,
@@ -61,7 +61,7 @@ function adaptRecord(r) {
 		yymm: r.yymm || undefined,
 		bodyType: inferBodyType(r.carName, r.type),
 		fuelType: GAS_MAP[r.carGas] || undefined,
-		mileage,
+		km,
 		price,
 		monthlyPrice,
 		noAccident: toBool(r.noAccident),

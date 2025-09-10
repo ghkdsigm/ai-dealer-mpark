@@ -77,6 +77,6 @@ app.use((err, _req, res, _next) => {
 const PORT = 3000
 app.listen(PORT, () => {
   console.log(`API server on http://localhost:${PORT}`)
-  console.log('DATA_FILE:', path.resolve(__dirname, '../_data/vehicles.json'))
+  console.log('DATA_FILE:', path.resolve(__dirname, '../_data/merge-vehicles.json'))
   console.log('WEIGHT_FILE:', path.resolve(__dirname, '../_data/weights.json'))
 })

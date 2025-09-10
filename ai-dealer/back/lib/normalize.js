@@ -9,7 +9,7 @@
 // 출력 스키마(정규화):
 //   {
 //     id, carNo, carName, make, model, trim,
-//     year, mileage, price, monthlyPrice, fuelType, bodyType,
+//     year, km, price, monthlyPrice, fuelType, bodyType,
 //     segment, transmission, noAccident, shortKm, yymm, color, colorCode,
 //     tags, options, _raw
 //   }
@@ -85,7 +85,7 @@ function mapFuel(carGas) {
   function normalizeRow(r) {
     const { make, model, trim } = splitMakeModel(r.carName)
     const year = toInt(r.yyyy)
-    const mileage = toInt(r.km)
+    const km = toInt(r.km)
     const price = toInt(r.demoAmt)               // 단위: 만원
     const monthlyPrice = toInt(r.monthlyDemoAmt) // 단위: 만원
     const fuelType = mapFuel(r.carGas)
@@ -104,7 +104,7 @@ function mapFuel(carGas) {
       model,
       trim,
       year,
-      mileage,
+      km,
       price,
       monthlyPrice,
       fuelType,     // gasoline|diesel|hybrid|ev|lpg|fcev|null

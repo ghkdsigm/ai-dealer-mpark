@@ -2,7 +2,7 @@
 const { simpleSim } = require('../lib/search')
 
 const YEAR_DECAY = 0.05 // 연식 1년 차이당 5% 보정
-const MILEAGE_DECAY_10K = 0.015 // 주행 1만km 차이당 1.5% 보정
+const km_DECAY_10K = 0.015 // 주행 1만km 차이당 1.5% 보정
 
 function median(arr) {
 	if (!arr.length) return 0
@@ -21,8 +21,8 @@ function adjustToSubjectPrice(comp, subj) {
 	let price = comp.price
 	const ydiff = subj.year && comp.year ? subj.year - comp.year : 0
 	price *= 1 + YEAR_DECAY * ydiff
-	const kmDiff10k = subj.mileage != null && comp.mileage != null ? (subj.mileage - comp.mileage) / 10000 : 0
-	price *= 1 - MILEAGE_DECAY_10K * kmDiff10k
+	const kmDiff10k = subj.km != null && comp.km != null ? (subj.km - comp.km) / 10000 : 0
+	price *= 1 - km_DECAY_10K * kmDiff10k
 	return Math.max(0, price)
 }
 
@@ -34,8 +34,8 @@ function buildComps(inventory, subject) {
 		let s = 0
 		if (subject.carName) s += 0.7 * simpleSim(v, subject.carName)
 		if (subject.year && v.year) s += 0.2 * Math.max(0, 1 - Math.abs(subject.year - v.year) / 5)
-		if (subject.mileage != null && v.mileage != null)
-			s += 0.1 * Math.max(0, 1 - Math.abs(subject.mileage - v.mileage) / 150000)
+		if (subject.km != null && v.km != null)
+			s += 0.1 * Math.max(0, 1 - Math.abs(subject.km - v.km) / 150000)
 		return { v, s }
 	})
 

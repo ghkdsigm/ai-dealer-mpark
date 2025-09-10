@@ -95,8 +95,8 @@ function ruleFilter(list, intent) {
 		out = out.filter(v => hasNumber(v.monthlyPrice) && v.monthlyPrice <= intent.monthlyMax)
 
 	// 주행
-	if (hasNumber(intent.mileageMin)) out = out.filter(v => hasNumber(v.mileage) && v.mileage >= intent.mileageMin)
-	if (hasNumber(intent.mileageMax)) out = out.filter(v => hasNumber(v.mileage) && v.mileage <= intent.mileageMax)
+	if (hasNumber(intent.kmMin)) out = out.filter(v => hasNumber(v.km) && v.km >= intent.kmMin)
+	if (hasNumber(intent.kmMax)) out = out.filter(v => hasNumber(v.km) && v.km <= intent.kmMax)
 
 	// 연식
 	if (hasNumber(intent.yearMin)) out = out.filter(v => hasNumber(v.year) && v.year >= intent.yearMin)
@@ -113,20 +113,20 @@ function filterWithRelaxation(list, intent) {
 	let out = ruleFilter(list, used)
 
 	// 주행 방향 유지
-	if (out.length === 0 && hasNumber(used.mileageMin) && !hasNumber(used.mileageMax)) {
-		used.mileageMin = Math.max(0, Math.floor(used.mileageMin * 0.9))
-		relaxed.push('mileageMin-10%')
+	if (out.length === 0 && hasNumber(used.kmMin) && !hasNumber(used.kmMax)) {
+		used.kmMin = Math.max(0, Math.floor(used.kmMin * 0.9))
+		relaxed.push('kmMin-10%')
 		out = ruleFilter(list, used)
 	}
-	if (out.length === 0 && hasNumber(used.mileageMax) && !hasNumber(used.mileageMin)) {
-		used.mileageMax = Math.ceil(used.mileageMax * 1.1)
-		relaxed.push('mileageMax+10%')
+	if (out.length === 0 && hasNumber(used.kmMax) && !hasNumber(used.kmMin)) {
+		used.kmMax = Math.ceil(used.kmMax * 1.1)
+		relaxed.push('kmMax+10%')
 		out = ruleFilter(list, used)
 	}
-	if (out.length === 0 && hasNumber(used.mileageMin) && hasNumber(used.mileageMax)) {
-		used.mileageMin = Math.max(0, Math.floor(used.mileageMin * 0.9))
-		used.mileageMax = Math.ceil(used.mileageMax * 1.1)
-		relaxed.push('mileage±10%')
+	if (out.length === 0 && hasNumber(used.kmMin) && hasNumber(used.kmMax)) {
+		used.kmMin = Math.max(0, Math.floor(used.kmMin * 0.9))
+		used.kmMax = Math.ceil(used.kmMax * 1.1)
+		relaxed.push('km±10%')
 		out = ruleFilter(list, used)
 	}
 
@@ -175,7 +175,7 @@ const DEFAULT_W = {
 	tfidf: 0.5, // 질의-텍스트 유사도
 	intentMatch: 0.2, // 카테고리 정합
 	price: 0.12, // 예산 근접도
-	mileage: 0.12, // 주행 근접도
+	km: 0.12, // 주행 근접도
 	year: 0.06, // 연식 근접도
 	diversityPenalty: 0.12, // 제조사 중복 페널티
 }
@@ -201,7 +201,7 @@ function rankVehicles(list, intent, query, weightsModelOrW) {
 	const qVec = tfidf.textToVec(query || '')
 
 	// 관측 통계(정규화에 사용)
-	const miles = items.filter(v => hasNumber(v.mileage)).map(v => v.mileage)
+	const miles = items.filter(v => hasNumber(v.km)).map(v => v.km)
 	const years = items.filter(v => hasNumber(v.year)).map(v => v.year)
 	const prices = items.filter(v => hasNumber(v.price)).map(v => v.price)
 	const minM = miles.length ? Math.min(...miles) : 0
@@ -239,20 +239,20 @@ function rankVehicles(list, intent, query, weightsModelOrW) {
 		return 0
 	}
 
-	function mileageCloseness(v) {
-		if (!hasNumber(v.mileage)) return 0
-		if (hasNumber(intent.mileageMin) && hasNumber(intent.mileageMax)) {
-			const c = (intent.mileageMin + intent.mileageMax) / 2
-			const span = Math.max(1, intent.mileageMax - intent.mileageMin)
-			return clamp01(1 - Math.abs(v.mileage - c) / span)
+	function kmCloseness(v) {
+		if (!hasNumber(v.km)) return 0
+		if (hasNumber(intent.kmMin) && hasNumber(intent.kmMax)) {
+			const c = (intent.kmMin + intent.kmMax) / 2
+			const span = Math.max(1, intent.kmMax - intent.kmMin)
+			return clamp01(1 - Math.abs(v.km - c) / span)
 		}
-		if (hasNumber(intent.mileageMax)) {
-			// 낮을수록 가점, 0~mileageMax 사이 정규화
-			return clamp01(1 - v.mileage / Math.max(1, intent.mileageMax))
+		if (hasNumber(intent.kmMax)) {
+			// 낮을수록 가점, 0~kmMax 사이 정규화
+			return clamp01(1 - v.km / Math.max(1, intent.kmMax))
 		}
-		if (hasNumber(intent.mileageMin)) {
-			// 높을수록 가점, mileageMin~maxM 사이 정규화
-			return clamp01((v.mileage - intent.mileageMin) / Math.max(1, maxM - intent.mileageMin))
+		if (hasNumber(intent.kmMin)) {
+			// 높을수록 가점, kmMin~maxM 사이 정규화
+			return clamp01((v.km - intent.kmMin) / Math.max(1, maxM - intent.kmMin))
 		}
 		return 0
 	}
@@ -328,11 +328,11 @@ function rankVehicles(list, intent, query, weightsModelOrW) {
 
 		const ms = intentMatch(v)
 		const ps = priceCloseness(v)
-		const ks = mileageCloseness(v)
+		const ks = kmCloseness(v)
 		const ys = yearCloseness(v)
 
 		// 선형 결합
-		const score = W.tfidf * sim + W.intentMatch * ms + W.price * ps + W.mileage * ks + W.year * ys
+		const score = W.tfidf * sim + W.intentMatch * ms + W.price * ps + W.km * ks + W.year * ys
 		return { v, sim, ms, ps, ks, ys, score }
 	})
 

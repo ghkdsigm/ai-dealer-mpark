@@ -25,7 +25,7 @@ function formatMoneyKman(x) {
     // 조건 요약
     const cond = [];
     if (intent?.budget?.maxKman) cond.push(`예산 ${formatMoneyKman(intent.budget.maxKman)} 이하`);
-    if (intent?.mileage?.maxKm) cond.push(`주행 ${intent.mileage.maxKm.toLocaleString()}km 이하`);
+    if (intent?.km?.maxKm) cond.push(`주행 ${intent.km.maxKm.toLocaleString()}km 이하`);
     if (intent?.fuelTypes?.length) cond.push(`연료 ${intent.fuelTypes.join('/')}`);
     if (intent?.bodyTypes?.length) cond.push(`차종 ${intent.bodyTypes.join('/')}`);
     if (intent?.brands?.length) cond.push(`브랜드 ${intent.brands.join('/')}`);
@@ -47,7 +47,7 @@ function formatMoneyKman(x) {
       const line = [
         `${i + 1}. ${shortName(v)}`,
         v.yymm ? `연식 ${v.yymm}` : null,
-        v.mileage != null ? `주행 ${Number(v.mileage).toLocaleString()}km` : null,
+        v.km != null ? `주행 ${Number(v.km).toLocaleString()}km` : null,
         v.fuelType ? v.fuelType : null,
         price ? `가격 ${price}` : null,
       ].filter(Boolean).join(' · ');

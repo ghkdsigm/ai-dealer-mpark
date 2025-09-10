@@ -10,7 +10,7 @@ const { askJSON } = require('../services/llm_gemma');
 //   isVehicleQuery: boolean,
 //   confidence: number,
 //   budget: { minKman?: number, maxKman?: number } | null,
-//   mileage: { minKm?: number, maxKm?: number } | null,
+//   km: { minKm?: number, maxKm?: number } | null,
 //   years: { min?: number, max?: number } | null,
 //   fuelTypes?: string[],
 //   bodyTypes?: string[],
@@ -42,7 +42,7 @@ function buildPrompt(q) {
       },
       "filters": {
         "budget": { "minKman": null|number, "maxKman": null|number },
-        "mileage": { "minKm": null|number, "maxKm": null|number },
+        "km": { "minKm": null|number, "maxKm": null|number },
         "years": { "min": null|number, "max": null|number },
         "fuelTypes": string[]|[],
         "bodyTypes": string[]|[],
@@ -65,7 +65,7 @@ function mapToLocalSchema(gOut) {
     isVehicleQuery: !!gOut?.intent?.isVehicleQuery,
     confidence: Number(gOut?.intent?.confidence ?? 0),
     budget: f.budget ?? null,
-    mileage: f.mileage ?? null,
+    km: f.km ?? null,
     years: f.years ?? null,
     fuelTypes: Array.isArray(f.fuelTypes) ? f.fuelTypes : [],
     bodyTypes: Array.isArray(f.bodyTypes) ? f.bodyTypes : [],
@@ -88,11 +88,11 @@ function mapToLocalSchema(gOut) {
     });
   }
   // 주행 단위 안전화
-  if (intent.mileage) {
+  if (intent.km) {
     ['minKm', 'maxKm'].forEach(k => {
-      if (intent.mileage[k] != null) {
-        const v = parseInt(intent.mileage[k], 10);
-        intent.mileage[k] = Number.isFinite(v) && v >= 0 ? v : null;
+      if (intent.km[k] != null) {
+        const v = parseInt(intent.km[k], 10);
+        intent.km[k] = Number.isFinite(v) && v >= 0 ? v : null;
       }
     });
   }

@@ -8,15 +8,14 @@ import { fileURLToPath } from 'url'
 // 파싱/검색형 LLM 유틸
 import { askJSONForChat } from '../services/llm_gemma.js'
 
-// 조언형 분류 및 LLM
+// 조언형 분류
 import { classifyIntentAdvice } from '../lib/util.js'
 import { normalizeIntent } from '../lib/filter.js'
-import { askAdviceLLM } from '../services/advice_llm.js'
 
 // 차량 정규화/랭킹
 import { filterAndRank, normalizeVehicle } from '../lib/filter.js'
 
-// 세션 유틸은 기존에 만든 app.js/session.js를 그대로 사용
+// 세션 유틸
 import { sidFrom } from '../app.js'
 import { getSess, resetSess } from '../services/session.js'
 
@@ -37,26 +36,129 @@ export default function buildRoutes() {
 		const sess = getSess(sid)
 		const msg = String(req.body?.message || '').trim()
 
-		// 1) 조언형/검색형 분기 우선 판단
+		// 1) 조언형/검색형 분기
 		const kind = classifyIntentAdvice(msg)
 		if (kind === 'advice') {
-			console.log(1)
-			// 선택: 필요시 짧은 KB 텍스트를 붙일 수 있다. 여기서는 생략
-			const kb = ''
-			const advice = await askAdviceLLM(msg, kb)
-			return res.json({
-				reply: [
-					advice.summary,
-					advice.bullets?.length ? '- ' + advice.bullets.join('\n- ') : '',
-					advice.caveats?.length ? `주의: ${advice.caveats.join(', ')}` : '',
-					advice.followups?.length ? `다음 질문: ${advice.followups.join(' / ')}` : '',
-				]
-					.filter(Boolean)
-					.join('\n'),
-				items: [],
-				route: 'advice',
-				intent: sess.intent,
+			// Ollama에 직접 프록시 (스트리밍)
+			const r = await fetch('http://127.0.0.1:11434/api/chat', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					model: 'gemma3',
+					stream: true,
+					messages: [
+						{
+							role: 'system',
+							content: `
+당신은 자동차 구매·사용 조언 상담사다.
+- 사용자에게 보이는 출력은 먼저 한국어 자연어 텍스트만 제공한다. 키 이름이나 JSON, 코드펜스를 포함하지 않는다.
+- 그 다음 줄에 정확히 "<JSON>" 한 줄을 출력한 뒤, 요구된 JSON만 출력하고 종료한다.
+- 최종 순서:
+  1) 사용자용 텍스트(마크업 느낌의 순수 문장)
+  2) <JSON>
+  3) JSON 객체
+`.trim(),
+						},
+						{ role: 'user', content: msg },
+					],
+					options: { temperature: 0.4, num_predict: 256 },
+				}),
 			})
+
+			// 스트리밍 헤더
+			res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+			res.setHeader('Cache-Control', 'no-cache')
+			res.setHeader('Connection', 'keep-alive')
+
+			const reader = r.body.getReader()
+			const decoder = new TextDecoder()
+
+			// 상태 머신: 가시 텍스트만 전달하다가 <JSON> 이후는 차단
+			let buffer = ''
+			let sawJSONMarker = false
+			let inFence = false // ``` 코드펜스 내부 여부
+			let fenceLang = '' // 코드펜스 언어 식별 (json 등)
+			let pending = '' // 가시 텍스트 누적 버퍼
+
+			function flushVisible(text) {
+				if (!text) return
+				// 일부 모델이 앞에 'n' 또는 '\n\n' 같은 가비지를 붙이는 것을 정리
+				if (!sawJSONMarker && pending.length === 0) {
+					text = text.replace(/^[n\r\n]+/, '')
+				}
+				res.write(text)
+			}
+
+			while (true) {
+				const { done, value } = await reader.read()
+				if (done) break
+
+				buffer += decoder.decode(value, { stream: true })
+
+				// Ollama 스트림은 \n 구분의 JSON line
+				let lines = buffer.split('\n')
+				buffer = lines.pop() // 마지막 불완전 줄
+
+				for (const line of lines) {
+					if (!line.trim()) continue
+					let event
+					try {
+						event = JSON.parse(line)
+					} catch {
+						continue
+					}
+
+					const delta = event.message?.content || ''
+					if (!delta) continue
+
+					// 1) JSON 구간 마커 감지: "<JSON>"
+					if (!sawJSONMarker && delta.includes('<JSON>')) {
+						const [before, afterMarker] = delta.split('<JSON>')
+						// 마커 이전 텍스트만 가시 출력
+						if (!inFence) flushVisible(before)
+						sawJSONMarker = true
+						// 이후 내용은 무시
+						continue
+					}
+
+					// 2) 코드펜스 필터: ``` 또는 ```json ... ```
+					let out = delta
+					// 코드펜스 토글 감지
+					const fenceOpenMatch = out.match(/```(\w+)?/)
+					const fenceClose = out.includes('```')
+
+					if (!sawJSONMarker) {
+						if (inFence) {
+							// 코드펜스 내부는 가시 출력에서 제외
+							if (fenceClose) {
+								inFence = false
+								fenceLang = ''
+							}
+							continue
+						} else {
+							if (fenceOpenMatch) {
+								inFence = true
+								fenceLang = fenceOpenMatch[1] || ''
+								// 펜스 시작 전의 텍스트만 출력
+								const idx = out.indexOf('```')
+								const beforeFence = out.slice(0, idx)
+								if (beforeFence) flushVisible(beforeFence)
+								// 이후는 펜스 내부로 간주하여 스킵
+								continue
+							}
+						}
+					}
+
+					// 3) 일반 상황: JSON 마커 전에는 그대로 내보냄, 이후는 버림
+					if (!sawJSONMarker && !inFence) {
+						flushVisible(out)
+					}
+				}
+			}
+
+			// 종료 신호
+			res.end()
+			return
 		}
 
 		// 2) 검색형 파이프라인
@@ -75,21 +177,16 @@ export default function buildRoutes() {
 		// 세션 intent 갱신
 		sess.intent = normalizeIntent({
 			...sess.intent,
-			// 금액
 			budgetMin: f?.budget?.minKman ?? sess.intent.budgetMin,
 			budgetMax: f?.budget?.maxKman ?? sess.intent.budgetMax,
-			// 월납입
 			monthlyMin: f?.monthly?.minKman ?? sess.intent.monthlyMin,
 			monthlyMax: f?.monthly?.maxKman ?? sess.intent.monthlyMax,
-			// 주행/연식
 			kmMin: f?.km?.minKm ?? sess.intent.kmMin,
 			kmMax: f?.km?.maxKm ?? sess.intent.kmMax,
 			yearMin: f?.years?.min ?? sess.intent.yearMin,
 			yearMax: f?.years?.max ?? sess.intent.yearMax,
-			// 연료/차종
 			fuelType: (f.fuelTypes && f.fuelTypes[0]) ?? sess.intent.fuelType,
 			bodyType: (f.bodyTypes && f.bodyTypes[0]) ?? sess.intent.bodyType,
-			// 기타
 			brands: Array.isArray(f.brands) && f.brands.length ? f.brands : sess.intent.brands || [],
 			models: Array.isArray(f.models) && f.models.length ? f.models : sess.intent.models || [],
 			colors: Array.isArray(f.colors) && f.colors.length ? f.colors : sess.intent.colors || [],
@@ -107,7 +204,7 @@ export default function buildRoutes() {
 			})
 		}
 
-		// 준비 상태 판정: 조건 중 하나라도 있으면 ready
+		// 준비 상태 판정
 		const i = sess.intent
 		const hasBudget = Number.isFinite(i.budgetMax) || Number.isFinite(i.budgetMin)
 		const hasMonthly = Number.isFinite(i.monthlyMax) || Number.isFinite(i.monthlyMin)
@@ -136,7 +233,7 @@ export default function buildRoutes() {
 			})
 		}
 
-		// 아직 부족하면 최소 단서만 더 유도
+		// 부족할 경우 추가 단서 유도
 		const asks = []
 		if (!hasBudget && !hasMonthly) asks.push('예산대 또는 월 납입액(예: 2천만 원대, 월 25만)')
 		if (!hasType) asks.push('차종/연료(예: 세단, SUV, 디젤)')
@@ -151,7 +248,7 @@ export default function buildRoutes() {
 		})
 	})
 
-	// 최종 추천: 세션 intent + 옵션 q 또는 filters 하나 더 반영
+	// 최종 추천
 	router.post('/recommend', async (req, res) => {
 		const sid = sidFrom(req)
 		const sess = getSess(sid)
@@ -161,10 +258,8 @@ export default function buildRoutes() {
 
 		let f = null
 		if (directFilters && typeof directFilters === 'object') {
-			// 클라이언트가 필터 객체를 직접 전달한 경우
 			f = directFilters
 		} else if (q) {
-			// 텍스트 질의가 있다면 파싱
 			const cloud = await askJSONForChat(q)
 			f = cloud?.filters || {}
 		} else {
